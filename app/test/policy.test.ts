@@ -103,18 +103,20 @@ describe('the question Studio previews is the question the gate builds', () => {
 })
 
 describe('the model key belongs to the factory, not to the author', () => {
-  const FACTORY_SOURCE = readFileSync(
-    fileURLToPath(new URL('../../contracts/src/PolicyGateFactory.sol', import.meta.url)),
+  // `PromptLib` is the single implementation of the splice: the factory and `AgentTreasury`
+  // both build through it, so this is the source the app's mirror has to agree with.
+  const PROMPT_LIB_SOURCE = readFileSync(
+    fileURLToPath(new URL('../../contracts/src/PromptLib.sol', import.meta.url)),
     'utf8',
   )
 
   it('leaves the model key out of the default prompt entirely', () => {
-    // The factory writes `{"model":"<modelName>",` itself and derives allowedModelHash from
+    // The contract writes `{"model":"<modelName>",` itself and derives allowedModelHash from
     // that same string, so a head carrying its own model key is rejected outright.
     expect(hasModelKey(DEFAULT_HEAD)).toBe(false)
     expect(hasModelKey(DEFAULT_TAIL)).toBe(false)
     expect(DEFAULT_HEAD.startsWith('{')).toBe(false)
-    expect(FACTORY_SOURCE).toContain('abi.encodePacked(\'{"model":"\', modelName, \'",\', promptHead)')
+    expect(PROMPT_LIB_SOURCE).toContain('abi.encodePacked(\'{"model":"\', modelName, \'",\', promptHead)')
   })
 
   it('rejects the bytes the factory rejects, and names the error it stands in for', () => {
@@ -128,7 +130,7 @@ describe('the model key belongs to the factory, not to the author', () => {
     expect(modelNameProblem('glm\n5')).toMatch(/ModelNameHasIllegalByte\(3\)/)
     // Counted in bytes, as the contract counts them, not in JavaScript characters.
     expect(modelNameProblem('é'.repeat(33))).toMatch(/ModelNameTooLong\(66\)/)
-    expect(FACTORY_SOURCE).toContain('MAX_MODEL_NAME = 64')
+    expect(PROMPT_LIB_SOURCE).toContain('MAX_MODEL_NAME = 64')
   })
 
   it('catches a smuggled second model key before a wallet is opened', () => {

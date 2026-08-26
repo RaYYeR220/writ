@@ -175,7 +175,7 @@ if (anvil) {
       await registry.getAddress(),
       wallet.address, // agent
       wallet.address, // owner
-      ethers.keccak256(ethers.toUtf8Bytes(MODEL)),
+      MODEL,
       PROVIDER,
       MAX_RISK,
     ],

@@ -128,12 +128,12 @@ export function refusalName(refusedBy: number | bigint): 'none' | 'model' | 'pol
   }
 }
 
-/** `AgentTreasury(registry, agent, owner, allowedModelHash, allowedProvider, maxRisk)`. */
+/** `AgentTreasury(registry, agent, owner, modelName, allowedProvider, maxRisk)`. */
 export const AGENT_TREASURY_CONSTRUCTOR_ARGS = [
   'address',
   'address',
   'address',
-  'bytes32',
+  'string',
   'address',
   'uint8',
 ] as const

@@ -269,7 +269,7 @@ export async function forkEnv(): Promise<EvalEnv> {
   const registryAddress = await deploy('WritRegistry', [serving], wallet)
   const treasuryAddress = await deploy(
     'AgentTreasury',
-    [registryAddress, wallet.address, wallet.address, ethers.keccak256(ethers.toUtf8Bytes(MODEL)), PROVIDER, MAX_RISK],
+    [registryAddress, wallet.address, wallet.address, MODEL, PROVIDER, MAX_RISK],
     wallet,
   )
 

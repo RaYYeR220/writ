@@ -294,8 +294,11 @@ describe('the members the app calls exist in the contracts', () => {
       expect([...inSource], `PolicyGateFactory.${name}`).toContain(name)
       expect(FACTORY.getFunction(name), `this app's ABI has no ${name}`).toBeTruthy()
     }
+    // The model-key splice and its four errors live in `PromptLib`, which the factory reverts
+    // through. Their selectors still reach a caller of `deployGate`, so the app's factory ABI
+    // has to carry them even though the declarations are read from the library.
     for (const err of ['ModelNameEmpty', 'ModelNameTooLong', 'ModelNameHasIllegalByte', 'ModelKeyInPrompt']) {
-      expect(sol('PolicyGateFactory.sol')).toContain(`error ${err}(`)
+      expect(sol('PromptLib.sol')).toContain(`error ${err}(`)
       expect(FACTORY.getError(err), `this app's ABI cannot decode ${err}`).toBeTruthy()
     }
   })
