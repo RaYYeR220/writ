@@ -4,7 +4,8 @@ pragma solidity 0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {PolicyGateFactory} from "../src/PolicyGateFactory.sol";
-import {AgentTreasury, AGENT_TREASURY_PROMPT_MODEL} from "../src/examples/AgentTreasury.sol";
+import {AgentTreasury} from "../src/examples/AgentTreasury.sol";
+import {PromptLib} from "../src/PromptLib.sol";
 import {IInferenceServing} from "../src/interfaces/IInferenceServing.sol";
 
 /// @title Deploy
@@ -27,7 +28,6 @@ contract Deploy is Script {
 
     error SignerNotAcknowledged(address provider);
     error NotTeeVerifiable(address provider, string verifiability);
-    error ModelIsNotTheOneThePromptNames(string served, string prompted);
     error RiskCeilingTooHigh(uint256 maxRisk);
     error ZeroAgent();
     error ZeroOwner();
@@ -78,23 +78,22 @@ contract Deploy is Script {
         console.log("model:            ", svc.model);
         console.log("tee signer:       ", svc.teeSignerAddress);
 
-        // The gate is pinned to the model 0G reports this provider serving, not to a constant
-        // written here: a stale name would refuse every proof the provider produces.
-        bytes32 modelHash = keccak256(bytes(svc.model));
-
-        // `AgentTreasury` also names its model inside the JSON body it pins, and that half is
-        // not a constructor parameter. Taking `allowedModelHash` from the provider while the
-        // question still names a different model would deploy a gate that asks about one model
-        // and accepts an answer from another — valid on its face and wrong underneath.
-        if (modelHash != keccak256(bytes(AGENT_TREASURY_PROMPT_MODEL))) {
-            revert ModelIsNotTheOneThePromptNames(svc.model, AGENT_TREASURY_PROMPT_MODEL);
-        }
+        // The treasury is pinned to the model 0G reports this provider serving, not to a constant
+        // written here: a stale name would refuse every proof the provider produces. That one
+        // name becomes both halves of the gate — the `"model"` key in the question and
+        // `allowedModelHash` — so there is no second argument left to disagree with it, and no
+        // deploy-time check needed to reconcile them.
+        //
+        // The name still has to survive being spliced into JSON. The constructor enforces that
+        // itself; this repeats the check ahead of the broadcast so a provider with an unusable
+        // name costs nothing rather than reverting on the third of three deployments.
+        PromptLib.requireModelName(svc.model);
 
         vm.startBroadcast(c.deployerKey);
         registry = new WritRegistry(c.serving);
         factory = new PolicyGateFactory(registry);
         // forge-lint: disable-next-line(unsafe-typecast)
-        treasury = new AgentTreasury(registry, c.agent, c.owner, modelHash, c.provider, uint8(c.maxRisk));
+        treasury = new AgentTreasury(registry, c.agent, c.owner, svc.model, c.provider, uint8(c.maxRisk));
         vm.stopBroadcast();
 
         console.log("WritRegistry:     ", address(registry));

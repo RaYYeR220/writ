@@ -6,6 +6,7 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {PolicyGateFactory} from "../src/PolicyGateFactory.sol";
 import {AgentTreasury} from "../src/examples/AgentTreasury.sol";
+import {PromptLib} from "../src/PromptLib.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
 
 /// @dev Runs the deploy script against a mock registry. Nothing is broadcast: without
@@ -51,13 +52,14 @@ contract DeployTest is Test {
         assertEq(treasury.owner(), OWNER);
     }
 
-    /// The model hash comes from what 0G's registry reports the provider serves, never from a
-    /// constant in the script: a gate pinned to a stale model name would refuse every proof.
+    /// The model comes from what 0G's registry reports the provider serves, never from a constant
+    /// in the script: a gate pinned to a stale model name would refuse every proof.
     function test_wiresTheModelHashFromTheLiveProvider() public {
         (,, AgentTreasury treasury) = deployScript.deploy(_config());
         assertEq(treasury.getPolicy(treasury.POLICY_ID()).allowedModelHash, keccak256(bytes(MODEL)));
         assertEq(treasury.getPolicy(treasury.POLICY_ID()).allowedProvider, PROVIDER);
         assertEq(treasury.getPolicy(treasury.POLICY_ID()).maxRisk, 50);
+        assertTrue(_contains(treasury.getPolicy(treasury.POLICY_ID()).promptHead, '{"model":"0GM-1.0-35B-A3B",'));
     }
 
     /// A provider 0G does not vouch for cannot produce a proof this gate would ever accept, so
@@ -74,13 +76,26 @@ contract DeployTest is Test {
         deployScript.deploy(_config());
     }
 
-    /// `AgentTreasury` names its model inside the JSON body it pins, so a provider serving
-    /// something else produces a gate that ASKS about one model and ACCEPTS an answer from
-    /// another — `allowedModelHash` would match the provider and the question would not.
-    /// Silently wrong is worse than refusing to deploy.
-    function test_refusesAProviderServingADifferentModel() public {
+    /// This used to be `test_refusesAProviderServingADifferentModel`, and the script used to carry
+    /// a `ModelIsNotTheOneThePromptNames` guard to make it fire: `AgentTreasury` spelled its model
+    /// inside the JSON literal, so a provider serving anything else produced a gate that ASKED
+    /// about one model and ACCEPTED an answer from another. The treasury now writes the question's
+    /// model key from the same string it hashes, so whatever the provider serves is what the gate
+    /// asks about AND what it accepts. There is nothing left to refuse.
+    function test_followsTheProviderOntoADifferentModel() public {
         serving.set(PROVIDER, "gpt-oss-120b", "TeeML", address(0x7EE), true);
-        vm.expectRevert(abi.encodeWithSelector(Deploy.ModelIsNotTheOneThePromptNames.selector, "gpt-oss-120b", MODEL));
+        (,, AgentTreasury treasury) = deployScript.deploy(_config());
+
+        assertEq(treasury.getPolicy(treasury.POLICY_ID()).allowedModelHash, keccak256(bytes("gpt-oss-120b")));
+        assertTrue(_contains(treasury.getPolicy(treasury.POLICY_ID()).promptHead, '{"model":"gpt-oss-120b",'));
+    }
+
+    /// A model name that cannot be spliced into the question is caught before the broadcast, so a
+    /// provider 0G reports under an unusable name costs nothing rather than reverting on the
+    /// third of three deployments.
+    function test_refusesAModelNameThatCannotBeSpliced() public {
+        serving.set(PROVIDER, 'x","messages":[', "TeeML", address(0x7EE), true);
+        vm.expectRevert(abi.encodeWithSelector(PromptLib.ModelNameHasIllegalByte.selector, uint256(1)));
         deployScript.deploy(_config());
     }
 
@@ -130,5 +145,21 @@ contract DeployTest is Test {
         assertEq(c.owner, OWNER);
         assertEq(c.maxRisk, 42);
         assertEq(c.deployerKey, DEPLOYER_PK);
+    }
+
+    function _contains(bytes memory haystack, string memory needle) internal pure returns (bool) {
+        bytes memory n = bytes(needle);
+        if (n.length > haystack.length) return false;
+        for (uint256 i = 0; i <= haystack.length - n.length; ++i) {
+            bool hit = true;
+            for (uint256 j = 0; j < n.length; ++j) {
+                if (haystack[i + j] != n[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) return true;
+        }
+        return false;
     }
 }
