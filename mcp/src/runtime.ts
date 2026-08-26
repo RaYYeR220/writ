@@ -152,8 +152,8 @@ export function createLiveDeps(cfg: WritConfig): WritDeps {
         ethers.getBytes(await call<string>('previewRequestBody', to, amountWei)),
       decisionKey: (p, r, s) => call<string>('decisionKey', p, r, s),
       consumed: (k) => call<boolean>('consumed', k),
-      execute: (a: SettleArgs) =>
-        settle('execute', [a.to, a.amountWei, a.rawResponse, a.provider, a.signature, a.transcriptRoot]),
+      // Neither carries a signature or a root: the gate reads a record, it does not make one.
+      execute: (a: SettleArgs) => settle('execute', [a.to, a.amountWei, a.rawResponse, a.provider]),
       executeRoutingProof: (a: SettleArgs & { routing: RoutingFields }) =>
         settle('executeRoutingProof', [
           a.to,
@@ -161,8 +161,6 @@ export function createLiveDeps(cfg: WritConfig): WritDeps {
           a.rawResponse,
           a.provider,
           [a.routing.providerType, a.routing.providerIdentity, a.routing.tlsFingerprint],
-          a.signature,
-          a.transcriptRoot,
         ]),
       parseLog: (log): DecodedEvent | null => {
         try {
@@ -201,7 +199,6 @@ export function createLiveDeps(cfg: WritConfig): WritDeps {
           modelHash: string
           reqHash: string
           respHash: string
-          transcriptRoot: string
           notarizedAt: bigint
           notarizedBy: string
         }>('getWrit', id)
@@ -210,11 +207,14 @@ export function createLiveDeps(cfg: WritConfig): WritDeps {
           modelHash: w.modelHash,
           reqHash: w.reqHash,
           respHash: w.respHash,
-          transcriptRoot: w.transcriptRoot,
           notarizedAt: w.notarizedAt,
           notarizedBy: ethers.getAddress(w.notarizedBy),
         }
       },
+      transcriptRoots: async (id) => [...(await call<readonly string[]>('transcriptRoots', id))],
+      transcriptSubmitter: async (id, root) =>
+        ethers.getAddress(await call<string>('transcriptSubmitter', id, root)),
+      addTranscript: (id, root) => write('addTranscript', [id, root]),
       getRoutingProof: async (id): Promise<RoutingFields> => {
         const p = await call<RoutingFields>('getRoutingProof', id)
         return {

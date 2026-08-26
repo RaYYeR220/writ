@@ -29,13 +29,18 @@ export type ServiceInfo = {
   teeSignerAcknowledged: boolean
 }
 
-/** `WritRegistry.Writ`. */
+/**
+ * `WritRegistry.Writ`.
+ *
+ * No transcript root: the TEE signs the request and response hashes and never a pointer to an
+ * archive, so a root is a claim rather than part of the record. Candidates come from
+ * `transcriptRoots` and are resolved by re-derivation — see `@writ/sdk`'s `resolveTranscript`.
+ */
 export type WritRecord = {
   provider: string
   modelHash: string
   reqHash: string
   respHash: string
-  transcriptRoot: string
   notarizedAt: bigint
   notarizedBy: string
 }
@@ -53,13 +58,18 @@ export type TxHandle = {
   wait(): Promise<TxReceiptLike | null>
 }
 
+/**
+ * What `TreasuryGate.execute` takes, which is no longer a signature or a root.
+ *
+ * The gate does not notarize any more. It reads a record that must already exist and reverts
+ * `WritNotNotarized` otherwise — so that a payout reverting cannot roll back the decision with
+ * it, and every outcome is equally permanent.
+ */
 export type SettleArgs = {
   to: string
   amountWei: bigint
   rawResponse: Uint8Array
   provider: string
-  signature: string
-  transcriptRoot: string
 }
 
 /**

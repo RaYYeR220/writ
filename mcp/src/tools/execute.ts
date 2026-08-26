@@ -5,7 +5,7 @@ import { refusalName, sha256Hex, type RoutingFields } from '@writ/sdk'
 import type { DecodedEvent, GateHandle, SettleArgs, TxReceiptLike, WritDeps } from '../deps.js'
 import { fail, runTool } from '../errors.js'
 import { diffFacts, explainDrift, parseQuestionFacts } from '../question.js'
-import { verifyArchivedTranscript } from '../rehydrate.js'
+import { resolveArchivedTranscript } from '../rehydrate.js'
 import { addressField, amountOut, bytes32Field, explorerTx } from './shared.js'
 
 const inputSchema = {
@@ -77,18 +77,11 @@ async function reconstruct(deps: WritDeps, gate: GateHandle, writId: string): Pr
 
   const routing = (await registry.isRoutingProof(writId)) ? await registry.getRoutingProof(writId) : undefined
 
-  if (/^0x0{64}$/i.test(w.transcriptRoot)) {
-    fail(
-      `writ ${writId} was notarized with an empty transcript root, so there is no archived response to settle with`,
-    )
-  }
-
   const svc = await deps.getService(w.provider)
-  const bytes = await deps.downloadTranscript(w.transcriptRoot)
-  const verified = verifyArchivedTranscript(bytes, svc.teeSignerAddress, {
-    reqHash: w.reqHash,
-    respHash: w.respHash,
-  })
+  // Walks every candidate pointer in submission order and takes the first that fully re-derives.
+  // A junk root published by a front-runner costs a fetch and nothing else; a list where none
+  // re-derive is an error, because there is then no response to settle with.
+  const { transcript: verified } = await resolveArchivedTranscript(deps, registry, writId, w, svc.teeSignerAddress)
 
   const { to, amountWei } = paramsFromRequest(verified.rawRequest)
 
@@ -99,8 +92,6 @@ async function reconstruct(deps: WritDeps, gate: GateHandle, writId: string): Pr
     rawRequest: verified.rawRequest,
     rawResponse: verified.rawResponse,
     provider: w.provider,
-    signature: verified.signature,
-    transcriptRoot: w.transcriptRoot,
     kind: verified.kind,
     ...(verified.routing ? { routing: verified.routing } : routing ? { routing } : {}),
     reqHash: verified.reqHash,
@@ -164,10 +155,16 @@ function decisionFrom(gate: GateHandle, logs: readonly unknown[]): DecodedEvent 
 /**
  * Settles an attested decision at the gate.
  *
- * A refusal is a successful outcome, not an error. The gate notarizes, emits `TransferRefused`,
- * spends the nonce and returns — the refusal is a permanent public record rather than something
- * a revert erases — so this tool returns it as a normal result and says who refused. Only a
- * failure to *verify* is an error, because that means no decision was shown at all.
+ * A refusal is a successful outcome, not an error. The gate emits `TransferRefused`, spends the
+ * nonce and returns — the refusal is a permanent public record rather than something a revert
+ * erases — so this tool returns it as a normal result and says who refused. Only a failure to
+ * *verify* is an error, because that means no decision was shown at all.
+ *
+ * The writ must already be notarized: the gate reverts `WritNotNotarized` otherwise, and will
+ * not put the record on chain on the way past. That is what stops a payout reverting from
+ * taking the decision with it, so that an approval nobody could pay is as permanent as a
+ * refusal. `writ_attest` does the notarizing, and treats "someone else got there first" as the
+ * success it is.
  *
  * The outcome is read from the emitted event, never assumed from the fact the transaction
  * mined: `execute` returns a bool, and a return value is not readable from a mined transaction.
@@ -217,8 +214,6 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
               rawRequest: held.rawRequest,
               rawResponse: held.rawResponse,
               provider: held.provider,
-              signature: held.signature,
-              transcriptRoot: held.transcriptRoot,
               kind: held.kind,
               ...(held.routing ? { routing: held.routing } : {}),
               reqHash: held.reqHash,
@@ -237,13 +232,14 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
           )
         }
 
+        // The gate does not notarize, so there is nothing to hand it but the action and the
+        // answer. The writ must already be on record — `writ_attest` put it there, or the
+        // reconstruction above proved it was already there.
         const args: SettleArgs = {
           to: material.to,
           amountWei: material.amountWei,
           rawResponse: material.rawResponse,
           provider: material.provider,
-          signature: material.signature,
-          transcriptRoot: material.transcriptRoot,
         }
 
         let receipt: TxReceiptLike | null

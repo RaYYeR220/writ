@@ -244,10 +244,18 @@ from the fact that the transaction mined. `execute` returns a bool, and a return
 readable from a mined transaction — so if no decision event is present, this tool errors rather
 than guessing.
 
+The writ must already be notarized. The gate does not put the record on chain on the way past
+and reverts `WritNotNotarized` if it is missing — which is what keeps an approval whose payout
+reverts from rolling the decision back with it, so that approved, refused and
+approved-but-unpayable are all equally permanent. `writ_attest` does the notarizing, in its own
+transaction, and treats "someone else got there first" as the success it is.
+
 If the server did not produce the writ itself (a restart, or another agent's writ), the response
-bytes and signature are rebuilt from public data: the archived transcript is pulled from 0G
-Storage, its merkle root recomputed, its hashes checked against what the chain pinned, and its
-signature recovered against the provider's registered TEE signer. Then `source` is
+bytes are rebuilt from public data: every archive pointer published for the writ is walked in
+submission order, and the first whose bytes survive the full re-derivation — merkle root
+recomputed, hashes checked against what the chain pinned, signature recovered against the
+provider's registered TEE signer — is the one used. A junk pointer from a front-runner costs a
+fetch; a list where none re-derive is an error and no transaction is sent. Then `source` is
 `"reconstructed"`. Any step failing is an error, not a fallback.
 
 ### `writ_lookup`
@@ -265,6 +273,7 @@ Output includes `verified: true` and a `checks` object naming every step:
 ```
 onChainRecordExists
 writIdMatchesItsContents
+aPublishedTranscriptCandidateReDerivesTheWrit
 transcriptRetrievedFrom0gStorage
 transcriptMerkleRootMatches
 requestRehashesToOnChainHash
@@ -275,8 +284,20 @@ signatureRecoversToRegisteredTeeSigner
 
 plus `provider`, `recordedModelHash`, `currentModel`,
 `modelHashMatchesCurrentRegistration`, `teeSigner`, `verifiability`, `teeSignerAcknowledged`,
-`reqHash`, `respHash`, `transcriptRoot`, `notarizedAt`, `notarizedAtUnix`, `notarizedBy`, `kind`,
-`routing`, `chatId`, `capturedAt`, `question`, `facts`, `answer`, `verdict`, `risk`, `notes`.
+`reqHash`, `respHash`, `transcriptRoot`, `transcriptSubmitter`, `transcriptCandidates`,
+`notarizedAt`, `notarizedAtUnix`, `notarizedBy`, `kind`, `routing`, `chatId`, `capturedAt`,
+`question`, `facts`, `answer`, `verdict`, `risk`, `notes`.
+
+`transcriptRoot` is not a field of the record — a writ has no root. The TEE signs the request and
+response hashes and never a pointer to an archive, and notarizing is permissionless, so whoever
+got there first would otherwise fix the archive pointer forever. `WritRegistry` keeps an
+append-only list of candidates instead, each attributed to its submitter and each bounded by a
+per-address quota of four. This tool walks that list in submission order and reports the first
+candidate whose bytes survive the full re-derivation; `transcriptCandidates` shows every one that
+was published and what became of it. A candidate that does not re-derive says something about
+whoever published it and nothing about the proof, which was verified by signature recovery at
+notarization time. If none of them re-derive, that is an error carrying the reasons — never a
+pass, and never a quiet fall back to the first one.
 
 `facts` here is parsed from the archived question, so it reports the treasury **as it stood when
 the model was asked**, not as it stands today.

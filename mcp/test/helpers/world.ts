@@ -27,6 +27,9 @@ import { WritStore } from '../../src/store.js'
 import { parseVerdict } from '../../src/verdict.js'
 
 const ZERO = '0x0000000000000000000000000000000000000000'
+
+/** `WritRegistry.MAX_ROOTS_PER_SUBMITTER` — per writ, per address. */
+const MAX_ROOTS_PER_SUBMITTER = 4
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const ROUTING_DOMAIN = ethers.keccak256(ethers.toUtf8Bytes('writ.routingProof.v1'))
 
@@ -108,6 +111,16 @@ export type World = {
   balance: bigint
   /** Puts a valid writ on chain without going through writ_attest. */
   seedWrit(o: { to: string; amountWei: bigint; answer?: string }): Promise<{ writId: string; transcriptRoot: string }>
+  /**
+   * Publishes a candidate archive pointer for a writ, as anyone may.
+   *
+   * `bytes` are what 0G Storage will hand back for it; omit them for a pointer that leads
+   * nowhere. This is how a test plays the front-runner who publishes junk before the real
+   * archivist gets there.
+   */
+  publishTranscript(o: { writId: string; root: string; submitter?: string; bytes?: Uint8Array }): void
+  /** Every candidate published for a writ, in submission order. */
+  transcriptRootsOf(writId: string): string[]
 }
 
 /**
@@ -156,6 +169,12 @@ export function makeWorld(opts: WorldOptions = {}): World {
 
   const writs = new Map<string, WritRecord>()
   const routingProofs = new Map<string, RoutingFields>()
+  /** Candidate archive pointers per writ, in submission order — `WritRegistry.transcriptRoots`. */
+  const transcriptRoots = new Map<string, string[]>()
+  /** Who published each candidate, which doubles as "already listed". */
+  const transcriptSubmitters = new Map<string, Map<string, string>>()
+  /** How much of `MAX_ROOTS_PER_SUBMITTER` each address has spent on a writ. */
+  const transcriptQuota = new Map<string, Map<string, number>>()
   const consumed = new Set<string>()
   const storage = new Map<string, Uint8Array>()
   const proofs = new Map<string, TeeProof>()
@@ -253,11 +272,34 @@ export function makeWorld(opts: WorldOptions = {}): World {
       modelHash,
       reqHash,
       respHash,
-      transcriptRoot,
       notarizedAt: 1_780_000_000n,
       notarizedBy: agent.address,
     })
     notarized.push(id)
+
+    // The notarizer's root goes in through the same door as every later one, attributed to them
+    // and against their quota. Being first to record the proof buys no standing. A zero root is
+    // the absence of a pointer, so it lists nothing.
+    if (transcriptRoot !== ethers.ZeroHash) addTranscript(id, transcriptRoot, agent.address)
+  }
+
+  /** `WritRegistry.addTranscript` — permissionless, deduplicated, and quota'd per address. */
+  function addTranscript(id: string, root: string, submitter: string): void {
+    if (!writs.has(id)) throw revert('NotNotarized', [id])
+    if (root === ethers.ZeroHash) throw revert('TranscriptRootEmpty', [])
+
+    const submitters = transcriptSubmitters.get(id) ?? new Map<string, string>()
+    if (submitters.has(root.toLowerCase())) throw revert('TranscriptAlreadyListed', [root])
+
+    const quota = transcriptQuota.get(id) ?? new Map<string, number>()
+    const used = quota.get(submitter.toLowerCase()) ?? 0
+    if (used >= MAX_ROOTS_PER_SUBMITTER) throw revert('TranscriptQuotaUsed', [submitter, MAX_ROOTS_PER_SUBMITTER])
+
+    quota.set(submitter.toLowerCase(), used + 1)
+    submitters.set(root.toLowerCase(), submitter)
+    transcriptQuota.set(id, quota)
+    transcriptSubmitters.set(id, submitters)
+    transcriptRoots.set(id, [...(transcriptRoots.get(id) ?? []), root])
   }
 
   function fakeTx(events: DecodedEvent[]): TxHandle {
@@ -284,6 +326,13 @@ export function makeWorld(opts: WorldOptions = {}): World {
       const p = routingProofs.get(id)
       if (!p) throw revert('NotARoutingProof', [id])
       return p
+    },
+    transcriptRoots: async (id) => transcriptRoots.get(id) ?? [],
+    transcriptSubmitter: async (id, root) =>
+      transcriptSubmitters.get(id)?.get(root.toLowerCase()) ?? ZERO,
+    addTranscript: async (id, root) => {
+      addTranscript(id, root, agent.address)
+      return fakeTx([]) as never
     },
     notarize: async (provider, reqHash, respHash, signature, transcriptRoot) => {
       const id = writIdOf(provider, reqHash, respHash)
@@ -328,19 +377,11 @@ export function makeWorld(opts: WorldOptions = {}): World {
     const decision = writIdOf(a.provider, reqHash, respHash)
     if (consumed.has(decision)) throw revert('WritAlreadyConsumed', [decision])
 
+    // The gate does NOT notarize. A record that is not already there is not something this
+    // transaction may create, because then an approval whose payout reverted would roll the
+    // decision back with it and only refusals would survive.
     const id = routing ? routingWritIdOf(a.provider, reqHash, respHash, routing) : decision
-    if (!writs.has(id)) {
-      record(
-        id,
-        a.provider,
-        reqHash,
-        respHash,
-        a.transcriptRoot,
-        a.signature,
-        routing ? signedTextRouting(reqHash, respHash, routing) : signedText(reqHash, respHash),
-      )
-      if (routing) routingProofs.set(id, routing)
-    }
+    if (!writs.has(id)) throw revert('WritNotNotarized', [id])
 
     const w = writs.get(id)!
     if (w.modelHash !== policy.allowedModelHash) {
@@ -566,6 +607,11 @@ export function makeWorld(opts: WorldOptions = {}): World {
     },
     factsFor,
     buildRequestBody,
+    publishTranscript: ({ writId, root, submitter, bytes }) => {
+      addTranscript(writId, root, submitter ?? impostor.address)
+      if (bytes) storage.set(root.toLowerCase(), bytes)
+    },
+    transcriptRootsOf: (writId: string) => transcriptRoots.get(writId) ?? [],
     deposit: (amountWei: bigint) => {
       state.balance += amountWei
     },

@@ -19,7 +19,15 @@ export type StoredWrit = {
   /** The exact question the TEE signed, kept so a stale-state failure can name what moved. */
   rawRequest: Uint8Array
   rawResponse: Uint8Array
+  /** Kept for reporting; the gate takes no signature, because it does not notarize. */
   signature: string
+  /**
+   * The candidate archive pointer THIS session published, not a field of the record.
+   *
+   * A writ carries no root: the TEE never signed one, so the registry keeps an append-only list
+   * of candidates instead and a reader takes the first that re-derives. This is simply which one
+   * was ours.
+   */
   transcriptRoot: string
   kind: 'chat' | 'routing'
   routing?: RoutingFields

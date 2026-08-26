@@ -364,3 +364,75 @@ describe('writ_execute rebuilds from public data when the session did not produc
     expect(world.settled).toHaveLength(0)
   })
 })
+
+/**
+ * Settling a writ this session did not produce, from public data alone.
+ *
+ * The response bytes are not on chain — only their hash is — so they come out of the archive.
+ * Which archive is the question the candidate list answers, and it answers it by arithmetic
+ * rather than by trusting whoever published first.
+ */
+describe('writ_execute rebuilds settlement material from the published candidates', () => {
+  const JUNK = '0x' + 'ba'.repeat(32)
+
+  it('settles past a front-runner’s junk pointer', async () => {
+    const world = makeWorld({ answer: 'ALLOW:12', maxRisk: 40 })
+    harness = await connect(world.deps)
+    const { writId } = await world.seedWrit({ to: RECIPIENT, amountWei: ethers.parseEther('0.01') })
+
+    const roots = world.transcriptRootsOf(writId)
+    const real = roots[0]!
+    roots.length = 0
+    roots.push(JUNK, real)
+    world.storage.set(
+      JUNK.toLowerCase(),
+      new TextEncoder().encode(JSON.stringify({ chatId: 'other', request: 'not this', response: 'not this' })),
+    )
+
+    const res = await harness.call('writ_execute', { gate: GATE, writId })
+
+    expect(res.isError, textOf(res)).toBeFalsy()
+    const out = res.structuredContent as Record<string, unknown>
+    expect(out['source']).toBe('reconstructed')
+    expect(out['outcome']).toBe('approved')
+    expect(world.settled).toHaveLength(1)
+  })
+
+  it('refuses to settle when no candidate re-derives, and sends nothing', async () => {
+    const world = makeWorld({ answer: 'ALLOW:12' })
+    harness = await connect(world.deps)
+    const { writId } = await world.seedWrit({ to: RECIPIENT, amountWei: ethers.parseEther('0.01') })
+
+    // Every published pointer is now a claim nobody can check.
+    world.storage.clear()
+    world.publishTranscript({ writId, root: JUNK })
+
+    const res = await harness.call('writ_execute', { gate: GATE, writId })
+
+    expect(res.isError).toBe(true)
+    expect(textOf(res)).toMatch(/no usable archived transcript/)
+    // No response bytes means no decision to settle — and, above all, no transaction.
+    expect(world.settled).toHaveLength(0)
+  })
+})
+
+describe('the gate settles a record it did not make', () => {
+  it('hands back WritNotNotarized rather than notarizing on the way past', async () => {
+    // Inline notarization is gone: an approval whose payout reverted would otherwise roll the
+    // record back with it, leaving only refusals permanent. `writ_attest` records the proof in
+    // its own transaction, and `writ_execute` acts on a record that already exists.
+    const world = makeWorld({ answer: 'ALLOW:12' })
+    harness = await connect(world.deps)
+
+    const attested = await harness.call('writ_attest', { gate: GATE, to: RECIPIENT, amount: '0.01' })
+    const writId = (attested.structuredContent as Record<string, unknown>)['writId'] as string
+    expect(world.notarized).toContain(writId)
+
+    // Nothing the settle call carries could put it back: no signature, no root.
+    expect(world.settled).toHaveLength(0)
+    const res = await harness.call('writ_execute', { gate: GATE, writId })
+    expect(res.isError, textOf(res)).toBeFalsy()
+    expect(world.settled[0]).not.toHaveProperty('signature')
+    expect(world.settled[0]).not.toHaveProperty('transcriptRoot')
+  })
+})

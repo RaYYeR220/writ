@@ -4,7 +4,7 @@ import * as z from 'zod/v4'
 import type { WritDeps } from '../deps.js'
 import { fail, runTool } from '../errors.js'
 import { factNotes, parseQuestionFacts, reportFacts } from '../question.js'
-import { verifyArchivedTranscript } from '../rehydrate.js'
+import { resolveArchivedTranscript } from '../rehydrate.js'
 import { parseVerdict } from '../verdict.js'
 import { addressField, bytes32Field } from './shared.js'
 
@@ -26,6 +26,7 @@ const outputSchema = {
     .object({
       onChainRecordExists: z.boolean(),
       writIdMatchesItsContents: z.boolean(),
+      aPublishedTranscriptCandidateReDerivesTheWrit: z.boolean(),
       transcriptRetrievedFrom0gStorage: z.boolean(),
       transcriptMerkleRootMatches: z.boolean(),
       requestRehashesToOnChainHash: z.boolean(),
@@ -45,7 +46,27 @@ const outputSchema = {
   teeSignerAcknowledged: z.boolean(),
   reqHash: z.string(),
   respHash: z.string(),
-  transcriptRoot: z.string(),
+  transcriptRoot: z
+    .string()
+    .describe(
+      'The candidate archive pointer whose bytes actually re-derive this writ. A writ records no ' +
+        'root of its own — the TEE never signed one — so this is the one that survived, not the one ' +
+        'that was published first.',
+    ),
+  transcriptSubmitter: z.string().describe('Who published the accepted pointer. Attribution, not endorsement.'),
+  transcriptCandidates: z
+    .array(
+      z.object({
+        root: z.string(),
+        submitter: z.string(),
+        state: z.enum(['accepted', 'rejected', 'unreachable', 'untried']),
+        reason: z.string(),
+      }),
+    )
+    .describe(
+      'Every pointer published for this writ, in submission order. Anyone may publish one, so a ' +
+        'rejected candidate says something about its submitter and nothing about the proof.',
+    ),
   notarizedAt: z.string().describe('ISO-8601 timestamp of the notarizing block.'),
   notarizedAtUnix: z.string(),
   notarizedBy: z.string(),
@@ -155,17 +176,20 @@ export function registerLookup(server: McpServer, deps: WritDeps): void {
           notes.push(`provider ${w.provider} has since un-acknowledged its TEE signer`)
         }
 
-        if (/^0x0{64}$/i.test(w.transcriptRoot)) {
-          fail(`writ ${writId} carries an empty transcript root, so nothing can be re-derived from it`)
+        // A writ points at no transcript, so the archived bytes are found rather than fetched:
+        // every candidate anyone published is tried in submission order and the first that
+        // fully re-derives wins. Throws when none of them do, naming whose claim failed and why.
+        const resolved = await resolveArchivedTranscript(deps, reg, writId, w, svc.teeSignerAddress)
+        const verified = resolved.transcript
+
+        const discarded = resolved.candidates.filter((c) => c.state === 'rejected' || c.state === 'unreachable')
+        if (discarded.length > 0) {
+          notes.push(
+            `${discarded.length} other archive pointer${discarded.length === 1 ? ' was' : 's were'} published for ` +
+              'this writ and did not re-derive it; that is noise rather than evidence, since anyone may publish a ' +
+              'root for any writ and this proof was verified by signature recovery independently of all of them',
+          )
         }
-
-        // Throws on a download failure or a merkle root that does not match what was asked for.
-        const bytes = await deps.downloadTranscript(w.transcriptRoot)
-
-        const verified = verifyArchivedTranscript(bytes, svc.teeSignerAddress, {
-          reqHash: w.reqHash,
-          respHash: w.respHash,
-        })
 
         if (isRouting !== (verified.kind === 'routing')) {
           fail(
@@ -213,6 +237,7 @@ export function registerLookup(server: McpServer, deps: WritDeps): void {
           checks: {
             onChainRecordExists: true,
             writIdMatchesItsContents: true,
+            aPublishedTranscriptCandidateReDerivesTheWrit: true,
             transcriptRetrievedFrom0gStorage: true,
             transcriptMerkleRootMatches: true,
             requestRehashesToOnChainHash: true,
@@ -229,7 +254,14 @@ export function registerLookup(server: McpServer, deps: WritDeps): void {
           teeSignerAcknowledged: svc.teeSignerAcknowledged,
           reqHash: w.reqHash,
           respHash: w.respHash,
-          transcriptRoot: w.transcriptRoot,
+          transcriptRoot: resolved.root,
+          transcriptSubmitter: resolved.submitter,
+          transcriptCandidates: resolved.candidates.map((c) => ({
+            root: c.root,
+            submitter: c.submitter,
+            state: c.state,
+            reason: c.reason ?? 're-derives this writ',
+          })),
           notarizedAt: new Date(Number(w.notarizedAt) * 1000).toISOString(),
           notarizedAtUnix: w.notarizedAt.toString(),
           notarizedBy: w.notarizedBy,

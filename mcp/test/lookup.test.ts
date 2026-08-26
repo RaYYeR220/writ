@@ -39,6 +39,7 @@ describe('writ_lookup', () => {
     expect(out['checks']).toEqual({
       onChainRecordExists: true,
       writIdMatchesItsContents: true,
+      aPublishedTranscriptCandidateReDerivesTheWrit: true,
       transcriptRetrievedFrom0gStorage: true,
       transcriptMerkleRootMatches: true,
       requestRehashesToOnChainHash: true,
@@ -46,6 +47,13 @@ describe('writ_lookup', () => {
       signedTextRebuildsFromThoseHashes: true,
       signatureRecoversToRegisteredTeeSigner: true,
     })
+
+    // The pointer is reported as somebody's claim that happened to survive, with their name on
+    // it — not as a field of the record, which carries none.
+    expect(out['transcriptSubmitter']).toBe(world.agent.address)
+    expect(out['transcriptCandidates']).toEqual([
+      { root: transcriptRoot, submitter: world.agent.address, state: 'accepted', reason: 're-derives this writ' },
+    ])
   })
 
   it('returns the archived question and answer, so a reader can judge for themselves', async () => {
@@ -209,5 +217,101 @@ describe('writ_lookup never reports an unverified writ as verified', () => {
 
     expect(res.isError).toBe(true)
     expect(textOf(res)).toMatch(/WRIT_REGISTRY/)
+  })
+})
+
+/**
+ * A writ points at no transcript, so `writ_lookup` finds one instead of fetching one.
+ *
+ * Anyone may publish a candidate pointer for any writ — that is deliberate, and it is what stops
+ * whoever notarizes first from fixing the archive pointer forever. The cost is that the list can
+ * contain anything, so the tool decides by arithmetic and reports whose claim it rejected.
+ */
+describe('writ_lookup resolves the transcript among the published candidates', () => {
+  const JUNK = '0x' + 'ba'.repeat(32)
+
+  it('walks past a junk candidate to the one that re-derives', async () => {
+    const { world, writId, transcriptRoot } = await seeded({ answer: 'ALLOW:12' })
+
+    // The front-runner's pointer leads to a real transcript — of a completely different
+    // exchange. It re-hashes internally and still says nothing about this writ.
+    world.publishTranscript({
+      writId,
+      root: JUNK,
+      bytes: new TextEncoder().encode(
+        JSON.stringify({ chatId: 'other', request: 'a different question', response: 'a different answer' }),
+      ),
+    })
+    // Published second, so the resolution has to reject the first to get here.
+    expect(world.transcriptRootsOf(writId)).toEqual([transcriptRoot, JUNK])
+
+    const out = (await harness!.call('writ_lookup', { writId })).structuredContent as Record<string, unknown>
+    expect(out['verified']).toBe(true)
+    expect(out['transcriptRoot']).toBe(transcriptRoot)
+
+    const candidates = out['transcriptCandidates'] as { root: string; state: string }[]
+    expect(candidates.map((c) => c.state)).toEqual(['accepted', 'untried'])
+  })
+
+  it('accepts the real pointer even when a front-runner published first', async () => {
+    const world = makeWorld({ answer: 'ALLOW:12' })
+    harness = await connect(world.deps)
+    const seed = await world.seedWrit({ to: RECIPIENT, amountWei: ethers.parseEther('0.02') })
+
+    // Re-order the list so the junk claim genuinely comes first — the shape of the attack, where
+    // someone learns a chat id from the public signature endpoint and publishes before the
+    // archivist does.
+    const roots = world.transcriptRootsOf(seed.writId)
+    const real = roots[0]!
+    roots.length = 0
+    roots.push(JUNK, real)
+
+    world.storage.set(
+      JUNK.toLowerCase(),
+      new TextEncoder().encode(JSON.stringify({ chatId: 'other', request: 'not this', response: 'not this' })),
+    )
+
+    const out = (await harness.call('writ_lookup', { writId: seed.writId })).structuredContent as Record<
+      string,
+      unknown
+    >
+
+    // Second in the list, and it wins anyway: being first buys the front-runner nothing.
+    expect(out['verified']).toBe(true)
+    expect(out['transcriptRoot']).toBe(real)
+    const candidates = out['transcriptCandidates'] as { root: string; state: string }[]
+    expect(candidates.map((c) => c.state)).toEqual(['rejected', 'accepted'])
+    expect((out['notes'] as string[]).join(' ')).toMatch(/noise rather than evidence/)
+  })
+
+  it('is an error — never a pass — when no candidate re-derives', async () => {
+    const { world, writId } = await seeded({ answer: 'ALLOW:12' })
+
+    // Wipe the real bytes out of 0G Storage and leave only somebody's junk claim beside it.
+    world.storage.clear()
+    world.publishTranscript({ writId, root: JUNK })
+
+    const res = await harness!.call('writ_lookup', { writId })
+    expect(res.isError).toBe(true)
+
+    const text = textOf(res)
+    expect(text).toMatch(/no usable archived transcript/)
+    // Named claims, and an explicit refusal to blame the proof for them.
+    expect(text).toMatch(/says nothing about the proof itself/)
+    expect(text).toContain(JUNK)
+  })
+
+  it('says plainly when nobody published a pointer at all', async () => {
+    const world = makeWorld({ answer: 'ALLOW:12' })
+    harness = await connect(world.deps)
+    const seed = await world.seedWrit({ to: RECIPIENT, amountWei: ethers.parseEther('0.03') })
+
+    // Forget every candidate, as a writ notarized with a zero root would have from the start.
+    world.transcriptRootsOf(seed.writId).length = 0
+
+    const res = await harness.call('writ_lookup', { writId: seed.writId })
+    expect(res.isError).toBe(true)
+    expect(textOf(res)).toMatch(/no archive pointer has been published/)
+    expect(textOf(res)).toMatch(/addTranscript/)
   })
 })

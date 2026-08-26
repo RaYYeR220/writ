@@ -1,12 +1,16 @@
 import {
+  listTranscriptCandidates,
   parseSignedText,
+  resolveTranscript,
   sha256Hex,
   signedText as buildSignedText,
   signedTextRouting,
   verifyProofLocally,
   verifyRoutingProofLocally,
+  type CandidateOutcome,
   type RoutingFields,
 } from '@writ/sdk'
+import type { RegistryHandle, WritDeps, WritRecord } from './deps.js'
 import { fail } from './errors.js'
 
 /**
@@ -148,5 +152,53 @@ export function verifyArchivedTranscript(
       signedTextRebuilds: true,
       signatureRecoversToRegisteredSigner: true,
     },
+  }
+}
+
+/**
+ * The archived transcript for a writ, found among the candidates anyone may have published.
+ *
+ * There is no single root to fetch any more. `WritRegistry` keeps an append-only, per-submitter
+ * quota'd list of candidates, because notarizing is permissionless and whoever got there first
+ * would otherwise fix the archive pointer forever — including someone who learned a chat id and
+ * published junk. So this walks the list in submission order and takes the first candidate that
+ * survives the full re-derivation: bytes that hash to the writ's own `reqHash`/`respHash`, a
+ * signed text that rebuilds from those hashes, and a signature that recovers to the provider's
+ * registered TEE signer.
+ *
+ * Every one of those checks is applied to every candidate, so a root that merely re-hashes but
+ * carries a forged signature is rejected exactly as a root pointing at the wrong bytes is.
+ *
+ * If nothing survives, this fails with the reasons, naming who published each claim. There is
+ * no fallback to the first candidate and no partial pass — a writ whose transcript cannot be
+ * resolved is a writ whose transcript is unavailable, which is a different thing from a writ
+ * that is wrong. The proof itself was verified by signature recovery at notarization time,
+ * independently of every pointer.
+ */
+export async function resolveArchivedTranscript(
+  deps: WritDeps,
+  registry: RegistryHandle,
+  writId: string,
+  writ: WritRecord,
+  expectedSigner: string,
+): Promise<{ transcript: VerifiedTranscript; root: string; submitter: string; candidates: CandidateOutcome[] }> {
+  const candidates = await listTranscriptCandidates(registry, writId)
+
+  const resolved = await resolveTranscript({
+    candidates,
+    download: (root) => deps.downloadTranscript(root),
+    accept: (bytes) =>
+      verifyArchivedTranscript(bytes, expectedSigner, { reqHash: writ.reqHash, respHash: writ.respHash }),
+  })
+
+  if (!resolved.ok) {
+    fail(`writ ${writId} has no usable archived transcript: ${resolved.reason}`)
+  }
+
+  return {
+    transcript: resolved.value,
+    root: resolved.root,
+    submitter: resolved.submitter,
+    candidates: resolved.candidates,
   }
 }
