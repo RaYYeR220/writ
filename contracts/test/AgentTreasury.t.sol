@@ -22,7 +22,9 @@ contract AgentTreasuryTest is Test {
     bytes32 constant TLS_FP = 0x67038b7d0b458b9d2e2e8a3451709f84bdcad46a71a36fe82bd7bdb266df2537;
 
     event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
-    event TransferRefused(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
+    event TransferRefused(
+        address indexed to, uint256 amount, uint8 risk, PolicyGate.Refusal refusedBy, bytes32 indexed writId
+    );
 
     MockInferenceServing serving;
     WritRegistry registry;
@@ -121,9 +123,10 @@ contract AgentTreasuryTest is Test {
         assertEq(refusal.emitter, address(treasury));
         assertEq(address(uint160(uint256(refusal.topics[1]))), dest);
         assertEq(refusal.topics[2], id);
-        (uint256 amount, uint8 risk) = abi.decode(refusal.data, (uint256, uint8));
+        (uint256 amount, uint8 risk, uint8 refusedBy) = abi.decode(refusal.data, (uint256, uint8, uint8));
         assertEq(amount, 9 ether);
         assertEq(risk, 91);
+        assertEq(refusedBy, uint8(PolicyGate.Refusal.Model));
 
         assertEq(dest.balance, 0);
         assertEq(address(treasury).balance, 10 ether);
@@ -147,8 +150,11 @@ contract AgentTreasuryTest is Test {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertFalse(approved);
         assertFalse(_has(logs, TransferApproved.selector));
-        (, uint8 risk) = abi.decode(_find(logs, TransferRefused.selector).data, (uint256, uint8));
+        (, uint8 risk, uint8 refusedBy) =
+            abi.decode(_find(logs, TransferRefused.selector).data, (uint256, uint8, uint8));
         assertEq(risk, 80);
+        // The model was willing at 80; this gate's ceiling of 50 is what refused.
+        assertEq(refusedBy, uint8(PolicyGate.Refusal.Policy));
 
         assertEq(dest.balance, 0);
         assertTrue(registry.isNotarized(id));

@@ -65,7 +65,9 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     error TransferFailed(address to, uint256 amount);
 
     event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
-    event TransferRefused(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
+    /// @dev `refusedBy` separates the model declining from this gate's ceiling declining an
+    ///      answer the model was willing to give. Both mean no funds moved.
+    event TransferRefused(address indexed to, uint256 amount, uint8 risk, Refusal refusedBy, bytes32 indexed writId);
     event Recovered(address indexed to, uint256 amount, uint64 lastAttestationAt);
 
     constructor(WritRegistry registry_, address agent_, address owner_, Policy memory policy) PolicyGate(registry_) {
@@ -104,11 +106,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         if (msg.sender != agent) revert NotAgent(msg.sender);
 
         bytes memory params = buildParams(to, amount, nonce);
-        uint8 risk;
-        bytes32 id;
-        (id, approved, risk) = _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot);
-
-        return _settle(to, amount, id, approved, risk);
+        return _settle(to, amount, _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot));
     }
 
     /// @notice `execute` against a centralized provider's routing proof.
@@ -127,16 +125,17 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         if (msg.sender != agent) revert NotAgent(msg.sender);
 
         bytes memory params = buildParams(to, amount, nonce);
-        uint8 risk;
-        bytes32 id;
-        (id, approved, risk) =
-            _consumeRoutingProof(POLICY_ID, params, rawResponse, provider, routing, signature, transcriptRoot);
-
-        return _settle(to, amount, id, approved, risk);
+        return _settle(
+            to,
+            amount,
+            _consumeRoutingProof(POLICY_ID, params, rawResponse, provider, routing, signature, transcriptRoot)
+        );
     }
 
     /// @dev Reached only once a proof has verified, so both proof kinds settle identically.
-    function _settle(address to, uint256 amount, bytes32 id, bool approved, uint8 risk) private returns (bool) {
+    ///      Approval is read off `refusedBy` rather than passed in beside it, so there is exactly
+    ///      one place that decides whether the money moves.
+    function _settle(address to, uint256 amount, Decision memory d) private returns (bool) {
         // A verified proof is what the recovery clock measures. A refusal counts: it is just as
         // much evidence that the provider is still signing.
         lastAttestationAt = uint64(block.timestamp);
@@ -146,12 +145,12 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
             ++nonce;
         }
 
-        if (!approved) {
-            emit TransferRefused(to, amount, risk, id);
+        if (d.refusedBy != Refusal.None) {
+            emit TransferRefused(to, amount, d.risk, d.refusedBy, d.id);
             return false;
         }
 
-        emit TransferApproved(to, amount, risk, id);
+        emit TransferApproved(to, amount, d.risk, d.id);
 
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert TransferFailed(to, amount);

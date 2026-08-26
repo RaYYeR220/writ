@@ -19,8 +19,9 @@ contract PolicyGateHarness is PolicyGate {
         address provider,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) external returns (bytes32 id, bool approved, uint8 risk) {
-        return _consume(policyId, params, rawResponse, provider, signature, transcriptRoot);
+    ) external returns (bytes32 id, bool approved, uint8 risk, Refusal refusedBy) {
+        Decision memory d = _consume(policyId, params, rawResponse, provider, signature, transcriptRoot);
+        return (d.id, d.approved, d.risk, d.refusedBy);
     }
 
     function consumeRoutingProof(
@@ -31,7 +32,10 @@ contract PolicyGateHarness is PolicyGate {
         WritRegistry.RoutingProof calldata routing,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) external returns (bytes32 id, bool approved, uint8 risk) {
-        return _consumeRoutingProof(policyId, params, rawResponse, provider, routing, signature, transcriptRoot);
+    ) external returns (bytes32 id, bool approved, uint8 risk, Refusal refusedBy) {
+        Decision memory d = _consumeRoutingProof(
+            policyId, params, rawResponse, provider, routing, signature, transcriptRoot
+        );
+        return (d.id, d.approved, d.risk, d.refusedBy);
     }
 }

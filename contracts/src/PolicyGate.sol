@@ -14,6 +14,29 @@ import {VerdictLib} from "./VerdictLib.sol";
 ///      decimal. Passing caller-supplied strings through would be JSON injection into the
 ///      pinned question.
 abstract contract PolicyGate {
+    /// @notice Who refused an action, for the decisions that were refused.
+    /// @dev Both refusals are equally final, but they mean different things and a reader deserves
+    ///      to be told which happened: `Model` is the model exercising judgement, `Policy` is the
+    ///      model being willing and this gate's ceiling saying no anyway.
+    enum Refusal {
+        None, // approved
+        Model, // the model itself answered DENY
+        Policy // the model answered ALLOW, above this policy's risk ceiling
+    }
+
+    /// @notice The outcome of consuming one attested verdict.
+    /// @dev Returned as a struct rather than a tuple for two reasons: four return values put
+    ///      `_consumeRoutingProof` over the stack limit, and a struct lets a later field be added
+    ///      without silently changing what an existing destructuring binds.
+    struct Decision {
+        /// @dev The writ the registry recorded. On the routing path this is the routing writ,
+        ///      which is NOT the key `consumed` is read at - see `decisionKey`.
+        bytes32 id;
+        bool approved;
+        uint8 risk;
+        Refusal refusedBy;
+    }
+
     struct Policy {
         bytes promptHead;
         bytes promptTail;
@@ -65,9 +88,8 @@ abstract contract PolicyGate {
     ///      refusal returns `approved == false` instead, so the notarization survives and the
     ///      record is permanent. Fail-closed means the guarded action does not happen, not that
     ///      the transaction disappears.
-    /// @return id The writ the registry recorded — the chat writ on this path.
-    /// @return approved True only for an ALLOW within the policy's risk ceiling.
-    /// @return risk The risk score the model reported.
+    /// @dev `Decision.approved` and `Decision.refusedBy` always agree; the refuser is named so a
+    ///      caller can tell the model declining from the policy overruling it.
     function _consume(
         uint256 policyId,
         bytes memory params,
@@ -75,11 +97,11 @@ abstract contract PolicyGate {
         address provider,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) internal returns (bytes32 id, bool approved, uint8 risk) {
+    ) internal returns (Decision memory) {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
         // On this path the record and the decision are the same key.
-        id = decisionKey(provider, reqHash, respHash);
+        bytes32 id = decisionKey(provider, reqHash, respHash);
         if (consumed[id]) revert WritAlreadyConsumed(id);
 
         // Notarizing is a public good; someone else may already have done it.
@@ -87,15 +109,13 @@ abstract contract PolicyGate {
             registry.notarize(provider, reqHash, respHash, signature, transcriptRoot);
         }
 
-        (approved, risk) = _decide(policyId, id, id, rawResponse);
+        return _decide(policyId, id, id, rawResponse);
     }
 
     /// @notice `_consume` for a centralized provider, whose TEE signs the five-field routing text.
     /// @dev Identical guarantees; only the signed format and the recorded writ differ. The
     ///      decision is still spent under `decisionKey`, so a routing proof and a chat proof of
     ///      the same answer cannot both authorise an action.
-    /// @return id The writ the registry recorded — the routing writ, which is NOT the key the
-    ///         decision is spent under. Read `consumed` at `decisionKey` for that.
     function _consumeRoutingProof(
         uint256 policyId,
         bytes memory params,
@@ -104,18 +124,18 @@ abstract contract PolicyGate {
         WritRegistry.RoutingProof calldata routing,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) internal returns (bytes32 id, bool approved, uint8 risk) {
+    ) internal returns (Decision memory) {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
         bytes32 decision = decisionKey(provider, reqHash, respHash);
         if (consumed[decision]) revert WritAlreadyConsumed(decision);
 
-        id = _routingId(provider, reqHash, respHash, routing);
+        bytes32 id = _routingId(provider, reqHash, respHash, routing);
         if (!registry.isNotarized(id)) {
             _notarizeRouting(provider, reqHash, respHash, routing, signature, transcriptRoot);
         }
 
-        (approved, risk) = _decide(policyId, id, decision, rawResponse);
+        return _decide(policyId, id, decision, rawResponse);
     }
 
     /// @notice The key a decision is spent under, whichever signed-text format proved it.
@@ -178,7 +198,7 @@ abstract contract PolicyGate {
     /// @param decision The key to spend, which is the same as `id` only on the chat path.
     function _decide(uint256 policyId, bytes32 id, bytes32 decision, bytes memory rawResponse)
         private
-        returns (bool approved, uint8 risk)
+        returns (Decision memory d)
     {
         Policy storage p = _policies[policyId];
 
@@ -190,7 +210,15 @@ abstract contract PolicyGate {
 
         // The decision is rendered either way, so it is spent either way.
         consumed[decision] = true;
-        risk = reported;
-        approved = allowed && reported <= p.maxRisk;
+
+        d.id = id;
+        d.risk = reported;
+        if (!allowed) {
+            d.refusedBy = Refusal.Model;
+        } else if (reported > p.maxRisk) {
+            d.refusedBy = Refusal.Policy;
+        } else {
+            d.approved = true;
+        }
     }
 }

@@ -81,7 +81,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
 
-        (bytes32 id, bool approved, uint8 risk) =
+        (bytes32 id, bool approved, uint8 risk,) =
             gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
         assertTrue(approved);
         assertEq(risk, 12);
@@ -97,7 +97,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("DENY:91");
 
-        (bytes32 id, bool approved, uint8 risk) =
+        (bytes32 id, bool approved, uint8 risk,) =
             gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
         assertFalse(approved);
         assertEq(risk, 91);
@@ -111,7 +111,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
 
-        (bytes32 routingId,,) =
+        (bytes32 routingId,,,) =
             gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
         assertTrue(routingId != registry.writId(PROVIDER, sha256(req), sha256(resp)));
         assertFalse(registry.isNotarized(registry.writId(PROVIDER, sha256(req), sha256(resp))));
@@ -202,7 +202,7 @@ contract PolicyGateTest is Test {
         bytes memory resp = _respBody("DENY:91");
         bytes32 decision = registry.writId(PROVIDER, sha256(req), sha256(resp));
 
-        (, bool approved,) =
+        (, bool approved,,) =
             gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
         assertFalse(approved);
 
@@ -216,7 +216,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
 
-        (bytes32 id, bool approved, uint8 risk) =
+        (bytes32 id, bool approved, uint8 risk,) =
             gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
         assertTrue(approved);
         assertEq(risk, 12);
@@ -230,7 +230,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("DENY:87");
 
-        (bytes32 id, bool approved, uint8 risk) =
+        (bytes32 id, bool approved, uint8 risk,) =
             gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
         assertFalse(approved);
         assertEq(risk, 87);
@@ -244,7 +244,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:80");
 
-        (bytes32 id, bool approved, uint8 risk) =
+        (bytes32 id, bool approved, uint8 risk,) =
             gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
         assertFalse(approved);
         assertEq(risk, 80);
@@ -253,12 +253,74 @@ contract PolicyGateTest is Test {
     }
 
     /// A risk exactly at the ceiling is still an approval.
+    /// "The model said no" and "the policy said no" are different facts and render differently.
+    function test_denyIsRefusedByTheModel() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("DENY:87");
+
+        (, bool approved, uint8 risk, PolicyGate.Refusal by) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertFalse(approved);
+        assertEq(risk, 87);
+        assertEq(uint8(by), uint8(PolicyGate.Refusal.Model));
+    }
+
+    function test_allowAboveTheCeilingIsRefusedByThePolicy() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:80");
+
+        (, bool approved, uint8 risk, PolicyGate.Refusal by) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertFalse(approved);
+        assertEq(risk, 80);
+        assertEq(uint8(by), uint8(PolicyGate.Refusal.Policy));
+    }
+
+    function test_anApprovalNamesNoRefuser() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+
+        (, bool approved,, PolicyGate.Refusal by) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertTrue(approved);
+        assertEq(uint8(by), uint8(PolicyGate.Refusal.None));
+    }
+
+    /// The two returns must never disagree, or a caller could read one and act on the other.
+    function test_approvedAgreesWithTheRefusalReason() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        string[3] memory verdicts = ["ALLOW:12", "ALLOW:80", "DENY:87"];
+
+        for (uint256 i = 0; i < verdicts.length; ++i) {
+            PolicyGateHarness g = new PolicyGateHarness(registry);
+            g.setPolicy(PID, gate.getPolicy(PID));
+            bytes memory req = g.buildRequestBody(PID, params);
+            bytes memory resp = _respBody(verdicts[i]);
+            (, bool approved,, PolicyGate.Refusal by) =
+                g.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+            assertEq(approved, by == PolicyGate.Refusal.None);
+        }
+    }
+
+    function test_routingProofAlsoNamesTheRefuser() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:80");
+
+        (,,, PolicyGate.Refusal by) =
+            gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertEq(uint8(by), uint8(PolicyGate.Refusal.Policy));
+    }
+
     function test_approvesRiskExactlyAtTheCeiling() public {
         bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:50");
 
-        (, bool approved, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        (, bool approved, uint8 risk,) = gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
         assertTrue(approved);
         assertEq(risk, 50);
     }
@@ -270,7 +332,7 @@ contract PolicyGateTest is Test {
         bytes memory resp = _respBody("DENY:87");
         bytes memory sig = _sign(req, resp);
 
-        (bytes32 id,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        (bytes32 id,,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
@@ -351,7 +413,7 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
         bytes memory sig = _sign(req, resp);
-        (bytes32 id,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        (bytes32 id,,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
@@ -366,7 +428,7 @@ contract PolicyGateTest is Test {
         vm.prank(address(0xABCD));
         registry.notarize(PROVIDER, sha256(req), sha256(resp), sig, bytes32(0));
 
-        (, bool approved, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        (, bool approved, uint8 risk,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
         assertTrue(approved);
         assertEq(risk, 12);
     }
