@@ -4,7 +4,7 @@ pragma solidity 0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {PolicyGateFactory} from "../src/PolicyGateFactory.sol";
-import {AgentTreasury} from "../src/examples/AgentTreasury.sol";
+import {AgentTreasury, AGENT_TREASURY_PROMPT_MODEL} from "../src/examples/AgentTreasury.sol";
 import {IInferenceServing} from "../src/interfaces/IInferenceServing.sol";
 
 /// @title Deploy
@@ -27,6 +27,7 @@ contract Deploy is Script {
 
     error SignerNotAcknowledged(address provider);
     error NotTeeVerifiable(address provider, string verifiability);
+    error ModelIsNotTheOneThePromptNames(string served, string prompted);
     error RiskCeilingTooHigh(uint256 maxRisk);
     error ZeroAgent();
     error ZeroOwner();
@@ -80,6 +81,14 @@ contract Deploy is Script {
         // The gate is pinned to the model 0G reports this provider serving, not to a constant
         // written here: a stale name would refuse every proof the provider produces.
         bytes32 modelHash = keccak256(bytes(svc.model));
+
+        // `AgentTreasury` also names its model inside the JSON body it pins, and that half is
+        // not a constructor parameter. Taking `allowedModelHash` from the provider while the
+        // question still names a different model would deploy a gate that asks about one model
+        // and accepts an answer from another — valid on its face and wrong underneath.
+        if (modelHash != keccak256(bytes(AGENT_TREASURY_PROMPT_MODEL))) {
+            revert ModelIsNotTheOneThePromptNames(svc.model, AGENT_TREASURY_PROMPT_MODEL);
+        }
 
         vm.startBroadcast(c.deployerKey);
         registry = new WritRegistry(c.serving);

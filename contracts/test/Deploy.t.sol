@@ -74,6 +74,16 @@ contract DeployTest is Test {
         deployScript.deploy(_config());
     }
 
+    /// `AgentTreasury` names its model inside the JSON body it pins, so a provider serving
+    /// something else produces a gate that ASKS about one model and ACCEPTS an answer from
+    /// another — `allowedModelHash` would match the provider and the question would not.
+    /// Silently wrong is worse than refusing to deploy.
+    function test_refusesAProviderServingADifferentModel() public {
+        serving.set(PROVIDER, "gpt-oss-120b", "TeeML", address(0x7EE), true);
+        vm.expectRevert(abi.encodeWithSelector(Deploy.ModelIsNotTheOneThePromptNames.selector, "gpt-oss-120b", MODEL));
+        deployScript.deploy(_config());
+    }
+
     /// The check runs before the broadcast, so a bad provider costs nothing.
     function test_refusesAProviderTheRegistryHasNeverSeen() public {
         Deploy.Config memory c = _config();

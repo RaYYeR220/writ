@@ -4,6 +4,11 @@ pragma solidity 0.8.24;
 import {TreasuryGate} from "../TreasuryGate.sol";
 import {WritRegistry} from "../WritRegistry.sol";
 
+// The model `AgentTreasury`'s question names, spelled exactly as it appears inside `promptHead`.
+// File-level so a deploy script can read it without an instance to read it from. The contract
+// republishes it as `PROMPT_MODEL` for on-chain readers; both are this one value.
+string constant AGENT_TREASURY_PROMPT_MODEL = "0GM-1.0-35B-A3B";
+
 /// @title AgentTreasury
 /// @notice The reference treasury gate: a ready-made policy an agent can be pointed at.
 /// @dev Everything except the model, provider and risk ceiling is fixed here, so the question
@@ -14,6 +19,15 @@ import {WritRegistry} from "../WritRegistry.sol";
 ///      act on it. The answer grammar stays exactly `ALLOW:<0-100>` or `DENY:<0-100>`, because
 ///      `VerdictLib` accepts nothing else.
 contract AgentTreasury is TreasuryGate {
+    /// @notice The model this treasury's question names, spelled exactly as it appears inside
+    ///         `promptHead`.
+    /// @dev Published so a deployer can check it against what 0G reports the chosen provider
+    ///      serving. `allowedModelHash` is a constructor parameter and this string is not, so
+    ///      the two can disagree — and a gate whose two halves disagree asks about one model and
+    ///      accepts an answer from another. Nothing on chain can reconcile them after the fact;
+    ///      the check belongs at deployment. See `script/Deploy.s.sol`.
+    string public constant PROMPT_MODEL = AGENT_TREASURY_PROMPT_MODEL;
+
     constructor(
         WritRegistry registry_,
         address agent_,
