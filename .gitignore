@@ -16,7 +16,6 @@ plans/
 specs/
 .remember/
 MEMORY.md
-.claude/
 .agents/
 *-internal/
 *-backup*

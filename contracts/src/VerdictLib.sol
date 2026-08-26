@@ -2,7 +2,7 @@
 pragma solidity 0.8.24;
 
 /// @title VerdictLib
-/// @notice Extracts a strict verdict token from an OpenAI-compatible chat completion body.
+/// @notice Extracts a strict verdict token from a chat-completions response body.
 /// @dev Deliberately not a JSON parser. The policy constrains the model to answer with exactly
 ///      `ALLOW:<0-100>` or `DENY:<0-100>`, so a marker-anchored scan with a hard length cap is
 ///      sufficient and total. Anything that does not match the grammar exactly reverts.
