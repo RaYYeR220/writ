@@ -27,7 +27,7 @@ export function foundryBin(name: 'forge' | 'anvil' | 'cast'): string {
 
 export type Artifact = {
   abi: ReadonlyArray<Record<string, unknown>>
-  bytecode: { object: string }
+  bytecode?: { object: string }
 }
 
 let built: boolean | null = null
@@ -57,8 +57,24 @@ export function ensureBuilt(): boolean {
   return built
 }
 
+let forced = false
+
 export function loadArtifact(name: string, sourceFile = `${name}.sol`): Artifact {
   const path = join(CONTRACTS_DIR, 'out', sourceFile, `${name}.json`)
-  if (!existsSync(path)) throw new Error(`missing Foundry artifact ${path}; run \`forge build\` in ${CONTRACTS_DIR}`)
-  return JSON.parse(readFileSync(path, 'utf8')) as Artifact
+  const read = (): Artifact => {
+    if (!existsSync(path)) {
+      throw new Error(`missing Foundry artifact ${path}; run \`forge build\` in ${CONTRACTS_DIR}`)
+    }
+    return JSON.parse(readFileSync(path, 'utf8')) as Artifact
+  }
+
+  let art = read()
+  // An incremental `forge build` emits ABI-only artifacts for contracts it did not have to
+  // recompile. Deployment needs the bytecode, so ask for it properly, once.
+  if (!art.bytecode?.object && !forced) {
+    forced = true
+    execFileSync(foundryBin('forge'), ['build', '--force'], { cwd: CONTRACTS_DIR, stdio: 'pipe', timeout: 600_000 })
+    art = read()
+  }
+  return art
 }
