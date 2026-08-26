@@ -40,12 +40,21 @@ export const WRIT_REGISTRY_ABI = [
  * `execute` and `executeRoutingProof` return `bool approved`, but a return value is not
  * readable from a mined transaction: read `TransferApproved` / `TransferRefused` from the
  * receipt instead. A refusal is a successful transaction.
+ *
+ * `buildParams` is `view`, not `pure`: the question it builds carries the treasury's live state
+ * (balance, decision counts, what this recipient has been paid before) as well as the proposed
+ * transfer. A proof is therefore bound to the treasury as it stood when the question was built —
+ * if the balance moves before the proof is settled, ask again. `approvedCount`, `refusedCount`
+ * and `recipientHistory` are exposed so a client can read the same facts the question reports.
  */
 export const TREASURY_GATE_ABI = [
   'function registry() view returns (address)',
   'function agent() view returns (address)',
   'function owner() view returns (address)',
   'function nonce() view returns (uint256)',
+  'function approvedCount() view returns (uint96)',
+  'function refusedCount() view returns (uint96)',
+  'function recipientHistory(address recipient) view returns (uint64 payments, uint192 total)',
   'function POLICY_ID() view returns (uint256)',
   'function RECOVERY_DELAY() view returns (uint64)',
   'function lastAttestationAt() view returns (uint64)',
@@ -53,7 +62,7 @@ export const TREASURY_GATE_ABI = [
   'function consumed(bytes32) view returns (bool)',
   'function decisionKey(address provider, bytes32 reqHash, bytes32 respHash) view returns (bytes32)',
   'function getPolicy(uint256 policyId) view returns (tuple(bytes promptHead, bytes promptTail, bytes32 allowedModelHash, address allowedProvider, uint8 maxRisk))',
-  'function buildParams(address to, uint256 amount, uint256 n) pure returns (bytes)',
+  'function buildParams(address to, uint256 amount) view returns (bytes)',
   'function buildRequestBody(uint256 policyId, bytes params) view returns (bytes)',
   'function previewRequestBody(address to, uint256 amount) view returns (bytes)',
   'function execute(address to, uint256 amount, bytes rawResponse, address provider, bytes signature, bytes32 transcriptRoot) returns (bool)',

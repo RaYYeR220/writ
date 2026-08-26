@@ -67,6 +67,43 @@ async function deploy(name: string, args: unknown[], signer: ethers.Signer): Pro
   return c as ethers.Contract
 }
 
+/**
+ * The nine facts `TreasuryGate.buildParams` pins, in order.
+ *
+ * Written out longhand rather than assembled from a list, because this is the shape a client
+ * has to be able to rely on and a test that generated it from the same list the code uses
+ * would agree with itself no matter what the contract emitted.
+ */
+const QUESTION = new RegExp(
+  'recipient=(?<recipient>0x[0-9a-f]{40}) ' +
+    'amount=(?<amount>\\d+) ' +
+    'nonce=(?<nonce>\\d+) ' +
+    'treasuryBalance=(?<treasuryBalance>\\d+) ' +
+    'amountPctOfBalance=(?<amountPctOfBalance>\\d+) ' +
+    'priorApprovals=(?<priorApprovals>\\d+) ' +
+    'priorRefusals=(?<priorRefusals>\\d+) ' +
+    'recipientPriorPayments=(?<recipientPriorPayments>\\d+) ' +
+    'recipientPriorTotal=(?<recipientPriorTotal>\\d+)',
+)
+
+/** The gate's question for one transfer, read back as numbers. */
+async function facts(to: string, amount: bigint) {
+  const params = new TextDecoder().decode(ethers.getBytes(await treasury['buildParams']!(to, amount)))
+  const g = QUESTION.exec(params)?.groups
+  if (!g) throw new Error(`buildParams did not produce the nine-field question: ${params}`)
+  return {
+    recipient: g['recipient']!,
+    amount: BigInt(g['amount']!),
+    nonce: BigInt(g['nonce']!),
+    treasuryBalance: BigInt(g['treasuryBalance']!),
+    amountPctOfBalance: BigInt(g['amountPctOfBalance']!),
+    priorApprovals: BigInt(g['priorApprovals']!),
+    priorRefusals: BigInt(g['priorRefusals']!),
+    recipientPriorPayments: BigInt(g['recipientPriorPayments']!),
+    recipientPriorTotal: BigInt(g['recipientPriorTotal']!),
+  }
+}
+
 /** The single decision the gate emitted, or a failure if it emitted none. */
 function decisionEvent(receipt: ethers.TransactionReceipt): ethers.LogDescription {
   const decisions = receipt.logs
@@ -166,7 +203,59 @@ describe('writ pipeline on a local chain', () => {
     // The question really is the contract's, parameterised by this exact transfer.
     const text = new TextDecoder().decode(bodyBytes)
     expect(text).toContain(to.toLowerCase())
-    expect(text).toContain('nonce=')
+
+    // Nine space-separated key=value pairs, in this order, with no quoting or escaping. The
+    // gate is the sole author of all of them: only `recipient` and `amount` came from the caller.
+    const params = QUESTION.exec(text)
+    expect(params, `no nine-field parameter block in: ${text}`).not.toBeNull()
+    expect(params!.groups!['recipient']).toBe(to.toLowerCase())
+    expect(params!.groups!['amount']).toBe(ethers.parseEther('1').toString())
+    expect(params!.groups!['nonce']).toBe((await treasury['nonce']!()).toString())
+  })
+
+  it.runIf(live())('pins the treasury as it actually stands, and moves with it', async () => {
+    const to = ethers.Wallet.createRandom().address
+    const amount = ethers.parseEther('1')
+    const treasuryAddress = await treasury.getAddress()
+
+    const before = await facts(to, amount)
+    expect(before.treasuryBalance).toBe(await wallet.provider!.getBalance(treasuryAddress))
+    expect(before.recipientPriorPayments).toBe(0n)
+    expect(before.recipientPriorTotal).toBe(0n)
+    expect(before.priorApprovals).toBe(await treasury['approvedCount']!())
+    // Reported against the balance *before* the transfer, floored, so it is directly comparable.
+    expect(before.amountPctOfBalance).toBe((amount * 100n) / before.treasuryBalance)
+
+    const { result } = await attestTransfer(to, amount, 'ALLOW:12')
+    await (
+      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT, GAS)
+    ).wait()
+
+    // The same call now describes a different treasury, because it is a different treasury.
+    const after = await facts(to, amount)
+    expect(after.treasuryBalance).toBe(before.treasuryBalance - amount)
+    expect(after.priorApprovals).toBe(before.priorApprovals + 1n)
+    expect(after.recipientPriorPayments).toBe(1n)
+    expect(after.recipientPriorTotal).toBe(amount)
+    expect(await treasury['recipientHistory']!(to)).toEqual([1n, amount])
+  })
+
+  it.runIf(live())('rejects a proof answering the treasury as it stood a moment ago', async () => {
+    const to = ethers.Wallet.createRandom().address
+    const amount = ethers.parseEther('1')
+
+    // A completely honest proof of the gate's own question…
+    const { result } = await attestTransfer(to, amount, 'ALLOW:12')
+
+    // …and then the treasury moves, so the balance and percentage the model judged are stale.
+    await (
+      await wallet.sendTransaction({ to: await treasury.getAddress(), value: ethers.parseEther('0.5') })
+    ).wait()
+
+    await expect(
+      treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT),
+    ).rejects.toThrow()
+    expect(await wallet.provider!.getBalance(to)).toBe(0n)
   })
 
   it.runIf(live())('notarizes an attested ALLOW, then moves funds in a second transaction', async () => {

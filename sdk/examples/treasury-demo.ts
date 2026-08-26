@@ -4,6 +4,13 @@
  *
  *   pnpm tsx examples/treasury-demo.ts
  *
+ * The question is nine contract-derived facts — the proposed transfer, the treasury's balance and
+ * the transfer's size as a percentage of it, how many decisions this gate has settled either way,
+ * and what this recipient has been paid before. All of it is read on chain at the moment the
+ * question is built, so the proof is bound to the treasury as it stood then: if the balance moves
+ * before the settlement lands, the gate is asking a different question and the proof no longer
+ * answers it. Run this again rather than retrying.
+ *
  * Required environment:
  *   WRIT_PRIVATE_KEY   the agent's key (also pays for storage and gas)
  *   WRIT_REGISTRY      deployed WritRegistry
@@ -111,11 +118,32 @@ console.log(`  endpoint     ${endpoint}`)
 const registry = new ethers.Contract(required('WRIT_REGISTRY'), WRIT_REGISTRY_ABI, wallet)
 const treasury = new ethers.Contract(required('WRIT_TREASURY', 'AGENT_TREASURY'), TREASURY_GATE_ABI, wallet)
 
+// Read the same facts the question is about to report, so the printout below can be checked
+// against them rather than taken on faith. None of these are inputs — the gate derives every one.
+const [treasuryBalance, gateNonce, approvedCount, refusedCount, history] = await Promise.all([
+  rpc.getBalance(await treasury.getAddress()),
+  treasury['nonce']!() as Promise<bigint>,
+  treasury['approvedCount']!() as Promise<bigint>,
+  treasury['refusedCount']!() as Promise<bigint>,
+  treasury['recipientHistory']!(to) as Promise<[bigint, bigint]>,
+])
+
+console.log(`\ntreasury ${await treasury.getAddress()}`)
+console.log(`  balance      ${ethers.formatEther(treasuryBalance)} 0G   nonce ${gateNonce}`)
+console.log(`  decisions    ${approvedCount} approved, ${refusedCount} refused`)
+console.log(
+  `  ${to} has been paid ${history[0]} time(s), ${ethers.formatEther(history[1])} 0G in total`,
+)
+
 const bodyHex: string = await treasury['previewRequestBody']!(to, amount)
 const bodyBytes = ethers.getBytes(bodyHex)
 
 console.log(`\nthe contract's own question (${bodyBytes.length} bytes, posted verbatim):`)
 console.log(new TextDecoder().decode(bodyBytes))
+console.log(
+  '\nevery fact in there was derived on chain just now. The proof about to be produced answers',
+)
+console.log('this treasury in this state; if the balance moves first, ask again.')
 
 // ------------------------------------- 5. inference, proof, archive, notarize
 
@@ -191,6 +219,16 @@ try {
   if (named) {
     console.error(`\nthe gate rejected the proof: ${named.name}(${named.args.join(', ')})`)
     console.error('that is a verification failure, not a decision — nothing was executed')
+    if (named.name === 'BadSignature') {
+      const now = await rpc.getBalance(await treasury.getAddress())
+      if (now !== treasuryBalance) {
+        console.error(
+          `the treasury moved from ${ethers.formatEther(treasuryBalance)} to ${ethers.formatEther(now)} 0G` +
+            ' while the proof was being obtained, so the gate is asking a different question now.' +
+            ' Re-run: the answer has to cover the treasury as it actually stands.',
+        )
+      }
+    }
   }
   throw err
 }
