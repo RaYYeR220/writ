@@ -31,6 +31,8 @@ contract WritRegistryTest is Test {
         bytes32 tlsFingerprint
     );
 
+    event TranscriptAdded(bytes32 indexed id, bytes32 indexed root, address indexed submitter);
+
     MockInferenceServing serving;
     WritRegistry registry;
 
@@ -236,5 +238,111 @@ contract WritRegistryTest is Test {
         vm.prank(address(0x1234));
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
         assertEq(registry.getWrit(id).notarizedBy, address(0x1234));
+    }
+
+    /// The root supplied at notarization is the first candidate, not a privileged one.
+    function test_notarizationSeedsTheFirstTranscriptRoot() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        bytes32[] memory roots = registry.transcriptRoots(id);
+        assertEq(roots.length, 1);
+        assertEq(roots[0], ROOT);
+        assertEq(registry.getWrit(id).transcriptRoot, ROOT);
+    }
+
+    /// A writ notarized without a pointer starts with no candidates at all.
+    function test_notarizationWithoutARootListsNothing() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, bytes32(0));
+        assertEq(registry.transcriptRoots(id).length, 0);
+    }
+
+    function test_seedsTheFirstTranscriptRootOnTheRoutingPath() public {
+        bytes32 id =
+            registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+        bytes32[] memory roots = registry.transcriptRoots(id);
+        assertEq(roots.length, 1);
+        assertEq(roots[0], ROOT);
+    }
+
+    function test_anyoneMayAppendATranscriptRoot() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        bytes32 second = bytes32(uint256(0xB0B));
+
+        vm.expectEmit(true, true, true, true, address(registry));
+        emit TranscriptAdded(id, second, address(0x1234));
+        vm.prank(address(0x1234));
+        registry.addTranscript(id, second);
+
+        bytes32[] memory roots = registry.transcriptRoots(id);
+        assertEq(roots.length, 2);
+        assertEq(roots[0], ROOT);
+        assertEq(roots[1], second);
+    }
+
+    /// Notarizing is permissionless and records are immutable, so a front-runner who learns a
+    /// chat id can fix a junk pointer forever. Appending is the answer: the real root can still
+    /// be published, and a consumer that re-derives the hashes sees which candidate is real.
+    function test_aFrontRunnersJunkRootDoesNotShutOutTheRealOne() public {
+        bytes32 junk = bytes32(uint256(0xDEADBEEF));
+        bytes32 real = bytes32(uint256(0xFACADE));
+
+        vm.prank(address(0xF00D));
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, junk);
+
+        vm.prank(address(0xA11CE));
+        registry.addTranscript(id, real);
+
+        bytes32[] memory roots = registry.transcriptRoots(id);
+        assertEq(roots.length, 2);
+        assertEq(roots[0], junk);
+        assertEq(roots[1], real);
+        // The stale pointer is still the one the record was born with, and always will be.
+        assertEq(registry.getWrit(id).transcriptRoot, junk);
+    }
+
+    function test_addTranscriptRejectsADuplicateRoot() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptAlreadyListed.selector, ROOT));
+        registry.addTranscript(id, ROOT);
+    }
+
+    function test_addTranscriptRejectsTheZeroRoot() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        vm.expectRevert(WritRegistry.TranscriptRootEmpty.selector);
+        registry.addTranscript(id, bytes32(0));
+    }
+
+    function test_addTranscriptRequiresTheWritToExist() public {
+        bytes32 ghost = keccak256("nope");
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotNotarized.selector, ghost));
+        registry.addTranscript(ghost, ROOT);
+    }
+
+    function test_transcriptRootsOfAnUnknownWritAreEmpty() public view {
+        assertEq(registry.transcriptRoots(keccak256("nope")).length, 0);
+    }
+
+    /// Appending is free to anyone, so it must be bounded or the list could be griefed into
+    /// gas nobody can afford to read.
+    function test_transcriptRootsAreCapped() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        uint256 cap = registry.MAX_TRANSCRIPT_ROOTS();
+
+        for (uint256 i = 1; i < cap; ++i) {
+            registry.addTranscript(id, bytes32(i + 1));
+        }
+        assertEq(registry.transcriptRoots(id).length, cap);
+
+        bytes32 overflowing = bytes32(cap + 99);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TooManyTranscriptRoots.selector, cap));
+        registry.addTranscript(id, overflowing);
+    }
+
+    function test_measuresAddTranscriptGas() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        uint256 before = gasleft();
+        registry.addTranscript(id, bytes32(uint256(0xB0B)));
+        uint256 used = before - gasleft();
+        console.log("addTranscript gas:", used);
+        assertLt(used, 100_000);
     }
 }
