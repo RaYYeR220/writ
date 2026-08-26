@@ -360,6 +360,33 @@ contract AgentTreasuryTest is Test {
         assertLt(used, 500_000);
     }
 
+    /// An attested ALLOW to the zero address would burn the treasury as surely as a bad recover.
+    function test_executeRevertsForZeroRecipient() public {
+        bytes memory req = treasury.previewRequestBody(address(0), 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _sign(req, resp);
+
+        vm.prank(agent);
+        vm.expectRevert(TreasuryGate.ZeroRecipient.selector);
+        treasury.execute(address(0), 1 ether, resp, PROVIDER, sig, bytes32(0));
+
+        assertEq(address(treasury).balance, 10 ether);
+        assertEq(treasury.nonce(), 0);
+    }
+
+    function test_executeRoutingProofRevertsForZeroRecipient() public {
+        bytes memory req = treasury.previewRequestBody(address(0), 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _signRouting(req, resp);
+
+        vm.prank(agent);
+        vm.expectRevert(TreasuryGate.ZeroRecipient.selector);
+        treasury.executeRoutingProof(address(0), 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+
+        assertEq(address(treasury).balance, 10 ether);
+        assertEq(treasury.nonce(), 0);
+    }
+
     /// The same gate, driven by a centralized provider's five-field routing proof.
     function test_movesFundsOnAttestedRoutingProof() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);

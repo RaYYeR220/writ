@@ -94,6 +94,11 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     /// @notice Move funds, but only against an attested ALLOW for this exact action.
     /// @dev A verified refusal is not an error: it notarizes, emits `TransferRefused`, spends the
     ///      nonce and returns false. Only a verification failure reverts.
+    ///
+    ///      The zero recipient is rejected before any of that. An attested ALLOW naming
+    ///      `address(0)` would burn the treasury exactly as a bad `recover` would, and no verdict
+    ///      should be able to authorise that, so the check sits ahead of the proof rather than
+    ///      inside the settlement.
     /// @return approved Whether the funds moved.
     function execute(
         address to,
@@ -104,6 +109,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         bytes32 transcriptRoot
     ) external nonReentrant returns (bool approved) {
         if (msg.sender != agent) revert NotAgent(msg.sender);
+        if (to == address(0)) revert ZeroRecipient();
 
         bytes memory params = buildParams(to, amount, nonce);
         return _settle(to, amount, _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot));
@@ -123,6 +129,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         bytes32 transcriptRoot
     ) external nonReentrant returns (bool approved) {
         if (msg.sender != agent) revert NotAgent(msg.sender);
+        if (to == address(0)) revert ZeroRecipient();
 
         bytes memory params = buildParams(to, amount, nonce);
         return _settle(
