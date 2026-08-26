@@ -57,6 +57,8 @@ library VerdictLib {
             }
         }
         if (digits == 0 || digits > 3 || value > 100) revert VerdictMalformed();
+        // casting to 'uint8' is safe because the line above rejects anything above 100
+        // forge-lint: disable-next-line(unsafe-typecast)
         risk = uint8(value);
     }
 
