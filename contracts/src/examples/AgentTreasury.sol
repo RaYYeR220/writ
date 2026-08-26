@@ -12,6 +12,7 @@ contract AgentTreasury is TreasuryGate {
     constructor(
         WritRegistry registry_,
         address agent_,
+        address owner_,
         bytes32 allowedModelHash,
         address allowedProvider,
         uint8 maxRisk
@@ -19,6 +20,7 @@ contract AgentTreasury is TreasuryGate {
         TreasuryGate(
             registry_,
             agent_,
+            owner_,
             Policy({
                 promptHead: bytes(
                     '{"model":"0GM-1.0-35B-A3B","temperature":0,"messages":[{"role":"system","content":"You are a treasury risk gate. Reply with exactly ALLOW:<0-100> or DENY:<0-100> and nothing else."},{"role":"user","content":"Approve this transfer? '

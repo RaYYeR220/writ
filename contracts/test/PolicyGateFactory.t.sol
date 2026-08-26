@@ -67,6 +67,7 @@ contract PolicyGateFactoryTest is Test {
 
         assertEq(address(gate.registry()), address(registry));
         assertEq(gate.agent(), agent);
+        assertEq(gate.owner(), owner);
 
         bytes memory req = gate.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");

@@ -25,6 +25,7 @@ contract AgentTreasuryTest is Test {
     AgentTreasury treasury;
     address tee;
     address agent = address(0xA9);
+    address owner = address(0x0FE);
     address payable dest = payable(address(0xD1));
 
     function setUp() public {
@@ -32,7 +33,7 @@ contract AgentTreasuryTest is Test {
         serving = new MockInferenceServing();
         serving.set(PROVIDER, MODEL, "TeeML", tee, true);
         registry = new WritRegistry(address(serving));
-        treasury = new AgentTreasury(registry, agent, keccak256(bytes(MODEL)), PROVIDER, 50);
+        treasury = new AgentTreasury(registry, agent, owner, keccak256(bytes(MODEL)), PROVIDER, 50);
         vm.deal(address(treasury), 10 ether);
     }
 

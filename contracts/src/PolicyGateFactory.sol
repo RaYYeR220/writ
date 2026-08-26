@@ -35,7 +35,8 @@ contract PolicyGateFactory {
         // A ceiling above 100 would wave through every verdict the grammar can express.
         if (p.maxRisk > 100) revert RiskCeilingTooHigh(p.maxRisk);
 
-        gate = address(new TreasuryGate(registry, agent, p));
+        // The deployer is the gate's owner, and so the only holder of its recovery hatch.
+        gate = address(new TreasuryGate(registry, agent, msg.sender, p));
 
         allGates.push(gate);
         _gatesByOwner[msg.sender].push(gate);
