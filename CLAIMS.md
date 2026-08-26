@@ -115,12 +115,12 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 5.1 | 38 scenarios, written and committed **before** the harness was run against them | REPRODUCIBLE | `eval/scenarios.json` (`"version": 2`, `"registeredOn": "2026-08-26"`); the v1→v2 diff is in git |
-| 5.2 | On a fork of 0G mainnet: 38/38 ran, 0 errored, 0 false approvals, 0 false refusals, 8 correct approvals, 30 correct refusals, 18/18 traps refused, 4/4 negative controls failed as designed, 0 mechanism mismatches; 25 scenarios answered adversarially and 13 supplied a correct answer | REPRODUCIBLE, and **dated — see 5.6** | `eval/results/fork.json`, `EVAL.md`. Reproduce with `cd writ/eval && pnpm eval:fork`. The artifact self-describes: it records the fork block it ran at, its start and finish timestamps, `inferenceServingIsLiveContract: true`, and `modelBehaviourMeasured: false` |
+| 5.1 | 43 scenarios, written and committed **before** the harness was run against them | REPRODUCIBLE | `eval/scenarios.json` (`"version": 4`, `"registeredOn": "2026-08-26"`) — 9 `safe`, 9 `dangerous`, 21 `trap`, 4 `control`. Every version diff is in git: v2 rewrote the key for the nine-fact question, v3 for the notarize/settle split, v4 added five centralized-routing scenarios and made recipient addresses seed-derived. **No `expected` value has ever been weakened in any revision** — what moved was the predicted *mechanism*, and `EVAL.md` names every prediction that was rewritten |
+| 5.2 | On a fork of 0G mainnet: 43/43 ran, 0 errored, 0 skipped, 0 false approvals, 0 false refusals, 9 correct approvals, 34 correct refusals, 21/21 traps refused, 4/4 negative controls failed as designed, 0 mechanism mismatches; 28 scenarios answered adversarially and 15 supplied a correct answer | REPRODUCIBLE, and **dated — see 5.6** | `eval/results/fork.json` (fork block 42720784, finished `2026-08-26T20:38:30Z`), `EVAL.md`. Reproduce with `cd writ/eval && pnpm eval:fork`. **Independently re-run on 2026-08-26 against a different fork block (42722755) via `npx tsx run.ts --fork --out <elsewhere>`, and the scorecard came back byte-identical** — so this row reproduces across blocks, not only from the committed artifact. The artifact self-describes: it records the fork block, its start and finish timestamps, `inferenceServingIsLiveContract: true`, `modelBehaviourMeasured: false`, and the public recipient seed |
 | 5.3 | The grader itself was falsified twice — inverted expectations must fail everything, broken setups must record as errored rather than pass | REPRODUCIBLE | `EVAL.md` § "Is the harness itself trustworthy?"; reproduce with `--scenarios <doctored key>` |
 | 5.4 | **The fork run measures our enforcement machinery. It measures nothing about the model's judgement.** | stated, not claimed | see NOT-CLAIMED #9. `fork.json` records `modelBehaviourMeasured: false` in the artifact itself |
 | 5.5 | No `--live` run has been performed | — | `EVAL.md` § "Scorecard — `--live`" is empty and says why |
-| 5.6 | **A scorecard is only valid for the contract revision it ran against, and this one has already been invalidated once.** The first committed run (block 42693145, 2026-08-26T13:16:49Z) predated the reshape that moved notarization out of the settle path and turned the transcript root into an append-only list. `eval/run.ts` still called the six-argument `execute`, so it stopped reproducing — silently, because a stale artifact keeps reading fine. It has since been brought forward and re-run at block **42716521** (2026-08-26T19:30:06Z), which is the run 5.2 reports | fact, stated because the failure mode is invisible | The artifact records its own fork block and timestamps, so a reader can check the provenance without trusting this row. **The rule that follows: after any change to a contract the harness calls, `eval/results/fork.json` must be regenerated before it is cited.** A scorecard that no longer reproduces looks exactly like one that does |
+| 5.6 | **A scorecard is only valid for the contract and harness revision it ran against, and this one has been superseded twice.** The first committed run (block 42693145, 2026-08-26T13:16:49Z) predated the reshape that moved notarization out of the settle path and turned the transcript root into an append-only list. `eval/run.ts` still called the six-argument `execute`, so it **stopped reproducing silently** — a stale artifact keeps reading fine. It was brought forward and re-run at block 42716521 under answer key v3. That run has since been superseded in turn, deliberately this time, by v4: five centralized-routing scenarios added and recipient addresses made seed-derived. The run 5.2 reports is block **42720784** (2026-08-26T20:38:30Z) | fact, stated because the first failure mode is invisible | The artifact records its own fork block, timestamps and answer-key version, so a reader can check provenance without trusting this row. **The rule that follows: after any change to a contract or to the harness, `eval/results/fork.json` must be regenerated before it is cited — and every document quoting it re-swept in the same commit.** A scorecard that no longer reproduces looks exactly like one that does. **This row's own siblings drifted for exactly that reason and it is worth admitting:** `CLAIMS.md` and `MOCKS.md` sat at 38 scenarios for a while after `EVAL.md` and the artifact had moved to 43. Two honesty documents disagreeing is worse than either number, and the second half of the rule above exists because of it |
 
 ## 6. What has never been run
 
@@ -174,16 +174,33 @@ wrong decision — and Writ will have done its job.
 
 ### 2. 0G's own SDK verification does not rebuild the signed text
 
-In `0g-compute-ts-sdk`, `Verifier.verifySignature` verifies the signature over **whatever `text`
-the provider returned** from `/v1/proxy/signature/{chatID}`. The client never rebuilds that text
-from the bytes it actually sent and received. The check therefore proves the TEE signed
-*something*; it does not prove the signed statement is about *your* request.
+In `0g-compute-ts-sdk` v0.9.0 (repo `0gfoundation/0g-compute-ts-sdk` at `3e833e2`, read
+2026-08-26), `Verifier.verifySignature` (`src.ts/sdk/inference/broker/verifier.ts:883`) verifies
+the signature over **whatever `text` the provider returned** from
+`/v1/proxy/signature/{chatID}` — its only caller,
+`src.ts/sdk/inference/broker/response.ts:98`, passes `ResponseSignature.text` straight through.
+The client never rebuilds that text from the bytes it actually sent and received. The check
+therefore proves the TEE signed *something*; it does not prove the signed statement is about
+*your* request.
+
+**0G's own documentation draws the same line, which is the best evidence that this is scope and
+not oversight.** `0gfoundation/0g-doc` at `df02a0c`,
+`docs/developer-hub/building-on-0g/compute-network/router/features/verifiable-execution.md`,
+lists four steps for verifying from scratch. The fourth is *"Confirm the signed `text` matches the
+response content you received from the Router."* `processResponse` performs the first three and
+cannot perform the fourth: its signature is
+`processResponse(providerAddress, chatID?, content?)`, and `content` is a usage JSON used to
+compute the fee. The request and response bodies never enter the function, so there is nothing in
+scope for it to compare.
 
 **This is a scope limitation of a client-side convenience helper, not a vulnerability in 0G.** The
 helper does exactly what it says; it is a signature check, not a binding check. 0G's own protocol
 documentation is explicit that the client is the party holding the bytes and is expected to compare
 the hashes — see the `0g-pc-e2ee` proof package, whose entire design is built around the verifier
-recomputing the binding itself.
+recomputing the binding itself. `protocol/proof/proof.go` documents `BindingHash` as "the single
+definition of the convention; the broker and the client MUST both route through it … so the bytes
+cannot drift", and marks `signing_address` as "a HINT for logging only — verification MUST anchor
+on the on-chain acknowledged `teeSignerAddress`".
 
 What Writ adds is doing that reconstruction **on chain**, from `sha256(request)` and
 `sha256(response)`, where the request half is a hash the calling contract computed from its own
@@ -269,8 +286,8 @@ Writ cannot compel a provider to produce evidence. It can only refuse to act wit
 ### 9. The fork evaluation proves our machinery, not the model's judgement
 
 On a fork the answer is supplied by us: the "TEE" is a key we generated and whoever holds the key
-decides what the "model" says. 13 of the 38 scenarios were graded against an answer we handed the
-stand-in, and on the fork those are circular by construction. The other 25 handed the stand-in an
+decides what the "model" says. 15 of the 43 scenarios were graded against an answer we handed the
+stand-in, and on the fork those are circular by construction. The other 28 handed the stand-in an
 answer a naive gate would be fooled by, so they are a genuine test of enforcement — but of
 enforcement only.
 

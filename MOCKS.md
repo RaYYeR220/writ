@@ -145,23 +145,26 @@ here.**
 | ABI fidelity | **REAL** — `app/test/abi.test.ts` compiles the Foundry project and compares selectors, event topic hashes **and return-tuple shapes**, including an explicit assertion that `getWrit` no longer carries a `transcriptRoot` |
 | Signature recovery, hashing | **REAL** — ethers in the browser, against the on-chain `teeSignerAddress` |
 
-## 5. The graded evaluation, `--fork` mode — `writ/eval`, 38 scenarios
+## 5. The graded evaluation, `--fork` mode — `writ/eval`, 43 scenarios
 
 `pnpm eval:fork`. Read-only RPC against 0G mainnet. **Spends nothing.**
 
-> **A note on provenance, because it has bitten this file once.** The first committed scorecard
+> **A note on provenance, because it has bitten this file twice.** The first committed scorecard
 > was taken at block 42693145, before the contracts were reshaped, and it kept reading perfectly
 > while quietly no longer reproducing — the harness was still calling the old six-argument
-> `execute`. It has been brought forward and re-run at block **42716521**. The table below
-> describes the environment of the current run. `CLAIMS.md` 5.6 carries the rule that follows:
-> regenerate `eval/results/fork.json` after any change to a contract the harness calls, because a
-> scorecard that no longer reproduces looks exactly like one that does.
+> `execute`. It was brought forward and re-run at block 42716521 under answer key v3. The harness
+> then moved again, deliberately: answer key **v4** added five centralized-routing scenarios and
+> made recipient addresses seed-derived. **This file lagged that second move** and described a
+> 38-scenario run while the artifact and `EVAL.md` had gone to 43 — the same drift in a different
+> guise, and the reason `CLAIMS.md` 5.6 now says every document quoting the scorecard must be
+> re-swept in the same commit. The table below describes the current committed run, block
+> **42720784**.
 
 This is the surface where the real/substituted line matters most, so it is spelled out step by step.
 
 | Piece | Real or substituted | Detail |
 |---|---|---|
-| Chain | **REAL 0G mainnet state** | `anvil --fork-url https://evmrpc.0g.ai`, forked at block 42716521 for the current committed run. The artifact records the block, so the number here is checkable rather than asserted |
+| Chain | **REAL 0G mainnet state** | `anvil --fork-url https://evmrpc.0g.ai`, forked at block 42720784 for the current committed run. The artifact records the block, so the number here is checkable rather than asserted. Re-running picks a fresh head block and the scorecard is unchanged by it — verified on 2026-08-26 at block 42722755 |
 | `InferenceServing` | **REAL — 0G's deployed contract** | `WritRegistry` is constructed against `0x47340d900bdFec2BD393c626E12ea0656F938d84` on the fork. Not a mock |
 | Reading a real provider | **REAL** | before anything else, the harness reads `0x4870Cb…` off the fork and records what it says: `0GM-1.0-35B-A3B`, `TeeML`, signer `0x8561E0a9dA3C8d6591A2E756a91334f1a3E537e0`, acknowledged |
 | **Registering the eval's provider** | **REAL registry logic, impersonated caller** | the harness impersonates a provider address on the fork and calls **0G's own `addOrUpdateService`**, paying the stake the registry actually charges — read out of the registry's own revert data rather than hardcoded, and 100 0G for the committed run. It then impersonates **the registry's own owner** (`0xddCDcbD9C7aeFB165dE00CE8684907fAAe8C8224`) and calls **0G's own `acknowledgeTEESignerByOwner`**. It then re-reads `getService` and refuses to proceed unless the registration actually took |
@@ -170,6 +173,7 @@ This is the surface where the real/substituted line matters most, so it is spell
 | Writ contracts | **REAL** | `forge build`, then deployed onto the fork |
 | Provider HTTP endpoint | **STAND-IN** | same shape as the SDK's stub |
 | 0G Storage | **SUBSTITUTED** | `eval/env.ts::forkTranscriptRoot` returns `'0x' + sha256(JSON.stringify(transcript))` instead of a merkle root — and not even over `serializeTranscript`'s bytes. It is at least a real commitment to real content, but it is **not** a 0G Storage root, and it is a third differently-shaped stand-in alongside the SDK's real `MemData` root and `world.ts`'s keccak256 |
+| Recipient addresses | **REAL addresses, deterministically derived** | `eval/recipients.ts` derives each one as `keccak256("<seed> <scenarioId> <role>")` from the committed fork seed `writ-eval-fork-recipients-v1`, rather than `ethers.Wallet.createRandom()`. The gate cannot tell the difference — it formats whatever address it is handed — but the run becomes reproducible address for address, and the keys survive the run so `sweep.ts` can return the funds. **A `--live` run must supply its own `WRIT_RECIPIENT_SEED`**; it will not reuse the committed one. The seed is published in the artifact under `recipients.seed` |
 | Fallback | **DECLARED** | if the fork RPC is unreachable the harness falls back to a bare chain and `MockInferenceServing`, and prints that under `environment facts`. **That fallback did not happen in the committed run** — `eval/results/fork.json` records `"inferenceServingIsLiveContract": true` |
 
 The harness keeps its own copy of the nine-fact question so it can post one the gate did not build
@@ -177,14 +181,14 @@ The harness keeps its own copy of the nine-fact question so it can post one the 
 the *honest* facts and compares them byte for byte against `buildParams`, refusing to run the probe
 if they differ, so a formatting bug of ours can never be mistaken for the gate's binding holding.
 
-25 of the 38 scenarios hand the stand-in an **adversarial** answer — the one a naive gate would be
-fooled by. Those are a real test of the enforcement machinery even on the fork. The other 13 hand it
+28 of the 43 scenarios hand the stand-in an **adversarial** answer — the one a naive gate would be
+fooled by. Those are a real test of the enforcement machinery even on the fork. The other 15 hand it
 the answer a correct model *would* give; those grade the plumbing and nothing else, and
 `eval/scenarios.json` records which is which per scenario.
 
 ## 6. The graded evaluation, `--live` mode — **never run**
 
-`WRIT_LIVE_CONFIRM=1 pnpm eval:live`. It is written, it typechecks, the same 38 scenarios feed it,
+`WRIT_LIVE_CONFIRM=1 pnpm eval:live`. It is written, it typechecks, the same 43 scenarios feed it,
 and it has never been executed.
 
 | Piece | What it would use |
@@ -195,6 +199,15 @@ and it has never been executed.
 | TEE key | the provider's real hardware key — **nothing substituted** |
 | 0G Storage | the real `archiveTranscript`, against `https://indexer-storage-turbo.0g.ai` |
 | Contracts | Writ's contracts, deployed on mainnet |
+| Recipient addresses | derived from an operator-supplied `WRIT_RECIPIENT_SEED` — **never the committed fork seed** — so the funds a live run moves are recoverable with `pnpm eval:sweep` instead of burnt to addresses nobody holds a key for |
+
+Not all 43 run live. **2 always report as skipped**, because they need a signer we control:
+`trap-response-echoes-prompt` (a TEE willing to sign a body we composed) and
+`control-forged-signer-sdk` (a provider endpoint that signs with the wrong key). Their on-chain
+equivalents do run, so neither property goes unmeasured. **A further 5 skip unless `WRIT_PROVIDER`
+is a centralized provider** — those are the routing-proof scenarios. So a live run grades 41 of 43
+against a centralized provider and 36 of 43 against a decentralized one, and every skip is printed
+with its reason and counted as a skip, never as a pass.
 
 Blocked on one thing: the deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` is unfunded,
 so there are no mainnet contracts to point it at and no 0G Compute ledger to pay a provider with.
@@ -269,3 +282,7 @@ leaving a reader to wonder:
 - **`app/src/lib/zg-merkle.ts`** is a real reimplementation, not a mock — the app genuinely
   recomputes 0G Storage's root in the browser. What is substituted is only its *test oracle*, one
   row above.
+- **`eval/recipients.ts`** produces real addresses, derived rather than random. Deriving them from
+  a published seed makes a run reproducible and its funds recoverable; it does not make the
+  addresses fake. The gate formats whatever address it is handed and the model sees one lowercase
+  hex string either way, so nothing the scenarios measure depends on where the address came from.

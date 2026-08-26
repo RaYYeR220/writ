@@ -28,6 +28,11 @@ helper, not as a vulnerability in 0G — is
 that text from the bytes the client actually sent. Writ rebuilds it on chain from
 `sha256(request)` and `sha256(response)`.
 
+0G's Router documentation lists four steps for verifying from scratch. `processResponse` does the
+first three; the fourth — *"Confirm the signed `text` matches the response content you received"* —
+is the binding step, and it is the one Writ moves on chain. The helper could not do it in any case:
+the request and response bodies are not among its arguments.
+
 The evidence tiers used throughout `CLAIMS.md`: **REPRODUCIBLE** (re-runnable from this repo),
 **VERIFIED-LIVE** (proven against 0G mainnet, read-only, dated), **MODELED** (reasoned, said out
 loud), **NOT-CLAIMED**.

@@ -29,6 +29,16 @@ the provider returned** from `/v1/proxy/signature/{chatID}`. The client never re
 from the bytes it actually sent and received. So the check proves the TEE signed *something*; it
 does not prove the signed statement is about *your* request.
 
+0G's own documentation draws the same line. Its "Independent verification" section lists four steps
+for verifying from scratch, and the fourth is:
+
+> 4. Confirm the signed `text` matches the response content you received from the Router.
+
+`processResponse` performs the first three. It cannot perform the fourth, and the helper's own
+signature is the reason: `processResponse(providerAddress, chatID?, content?)` never receives the
+request body or the response body — `content` is a usage JSON used to compute the fee. Nothing in
+scope for that function could be compared against the signed text.
+
 **That is a scope limitation of a client-side convenience helper, not a vulnerability in 0G.** The
 helper does what it says: it is a signature check, not a binding check. 0G's own protocol design
 puts the binding on the verifier. `0g-pc-e2ee`'s `protocol/proof/proof.go` is explicit about it —
@@ -51,10 +61,23 @@ request to the response with a hardware key whose address is published on chain 
 `InferenceServing` contract. That signature is real, checkable, and today it goes nowhere.
 
 **It is private.** Verification happens in a client, so what you end up holding is a report rather
-than a fact: nobody else can recompute it from public data, and no contract can act on it. Going
-through 0G's hosted Router instead does not change the shape — a verification flag handed to you
-is worth exactly your trust in whoever handed it over. Either way the result stops at the party
-that ran the check.
+than a fact: nobody else can recompute it from public data, and no contract can act on it. 0G says
+this about the hosted path themselves, and better than we would — `0gfoundation/0g-doc` at
+`df02a0c`, `docs/developer-hub/building-on-0g/compute-network/router/features/verifiable-execution.md`,
+under "Trust model":
+
+> `verify_tee: true` asks the **Router** to fetch the provider's TEE signature, look up the signer
+> address on-chain, and verify the signature on your behalf. The Router returns a single boolean
+> (`tee_verified`) summarising that check.
+>
+> In other words, `tee_verified: true` in the response says *"the Router says it verified the
+> signature."* It does **not** carry the raw signature back to you — you still have to trust the
+> Router to have done the check honestly.
+
+The same page is equally clear that this is a choice rather than a limit: "all the inputs the
+Router uses are public", and it lists the steps to reproduce the check yourself. Either way the
+result stops at the party that ran it. Writ's difference is not that it verifies — it is where the
+verification lands.
 
 **It expires.** `GET {providerUrl}/v1/proxy/signature/{chatID}` is public and unauthenticated, but
 brokers cache signatures with a TTL. A live mainnet provider answers an unknown chat id with,
