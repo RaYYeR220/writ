@@ -38,6 +38,7 @@ that could be mistaken for a deployment.
 ```
 1. Policy on chain      A PolicyGate holds a prompt head, a prompt tail, an allowed model hash,
                         an optional allowed provider, and a risk ceiling. Fixed at construction.
+                        The head and the hash are derived from ONE model name — see §6.4.
 
 2. Question built       The CONTRACT assembles the request body: promptHead ‖ params ‖ promptTail,
                         where params are derived from the contract's own state and the action
@@ -50,20 +51,26 @@ that could be mistaken for a deployment.
 4. Proof claimed        GET <endpoint>/signature/{chatId}?model=… — public, unauthenticated, and
                         it expires. Claimed immediately, before anything slow happens.
 
-5. Archive              Transcript uploaded to 0G Storage; the merkle root travels on chain.
+5. Archive              Transcript uploaded to 0G Storage; the merkle root is published on chain
+                        as a CANDIDATE pointer. It is not attested by anything — see §6.3.
 
 6. Notarize             WritRegistry reads 0G's live InferenceServing on the same chain, rebuilds
                         the signed text from the two hashes, recovers the signer, and compares it
                         to the provider's registered teeSignerAddress. Recorded forever.
 
 7. Settle               The gate rebuilds its own question from its own state, hashes it with the
-                        sha256 precompile, and requires the writ to pin exactly that hash. Then it
-                        parses the verdict out of the revealed response bytes and acts.
+                        sha256 precompile, and requires the writ to ALREADY EXIST under exactly
+                        that hash. Then it parses the verdict out of the revealed response bytes
+                        and acts.
 ```
 
-Steps 6 and 7 are deliberately separate transactions in the SDK. Combining them means a revert in
-the action can roll back the record of the decision — see
-[§6.5 `TreasuryGate`](#65-treasurygate) and `sdk/src/notarize.ts`.
+**Steps 6 and 7 are separate transactions, and that is enforced on chain, not merely recommended.**
+`PolicyGate._consume` reverts `WritNotNotarized(bytes32)` if the writ is not already on the
+registry; it has no signature argument and cannot notarize. A gate that notarized inline would put
+the permanent record and the guarded action in one transaction, so an approval whose payout
+reverted would roll the record back with it — refusals would be permanent and failed approvals
+would leave nothing, which falsifies the whole point. See
+[§6.4 `PolicyGate`](#64-policygate) and `contracts/test/AgentTreasury.t.sol::test_aRevertingRecipientLeavesTheNotarizationIntact`.
 
 ---
 
@@ -188,8 +195,10 @@ whose meaning we had not pinned down.
 `strings.Join([h], ",")` is just `h`, so the text is `sha256(req):sha256(img₀)` — **129 bytes, and
 byte-shape identical to Format A.** A single-image proof is therefore indistinguishable from a chat
 proof, and both `WritLib.signedText` and `sdk/src/hashes.ts::parseSignedText` would treat it as
-one. The SDK's own comment claiming the image format "is rejected rather than mistaken for a chat
-proof" is only true for `n ≥ 2`. See `CLAIMS.md` — this is listed there, not buried here.
+one. Both code comments that used to claim the image format "is rejected rather than mistaken for a
+chat proof" have since been corrected to say exactly this — `WritLib`'s NatSpec and
+`sdk/src/hashes.ts::parseSignedText`'s doc comment. Neither the contract nor the SDK now claims a
+discrimination it does not perform. See `CLAIMS.md` — this is listed there, not buried here.
 
 We judge the practical consequence small: a writ recorded that way would still say something true
 (the TEE did sign that pair), and a `PolicyGate` could only consume it if the raw image bytes both
@@ -368,6 +377,13 @@ about itself: it re-hashes the bytes, rebuilds the signed text from those hashes
 signature against `InferenceServing.getService(provider).teeSignerAddress`. `signingAddress` in the
 file is discarded.
 
+**Which transcript?** Whichever candidate re-derives. A writ carries a list of claimed archive
+pointers, not one authoritative root, so a consumer walks them in submission order and stops at the
+first whose bytes hash to the writ's `reqHash` and `respHash`. If none does, the correct report is
+**`unavailable` with a reason** — never a failure attributed to the writ, which was verified by
+signature recovery independently of every pointer. See
+[the transcript list](#the-transcript-list-candidates-not-facts).
+
 ---
 
 ## 5. The nine-fact question
@@ -463,11 +479,15 @@ Source lives in `contracts/src/`. Solidity `0.8.24` exactly. Dependencies:
 |---|---|---|---|
 | `WritLib` | library, `internal pure` only | — | no |
 | `VerdictLib` | library, `internal pure` only | — | no |
+| `PromptLib` | library, `internal pure` only | — | no |
 | `WritRegistry` | contract | **none** | no |
 | `PolicyGate` | abstract base | — | no |
 | `TreasuryGate` | contract | `owner` holds only the recovery hatch | no |
 | `AgentTreasury` | `TreasuryGate` with its policy baked in | as above | no |
 | `PolicyGateFactory` | contract | **none** | no |
+
+There is also `script/Deploy.s.sol`, which is not a deployed contract but is the only supported way
+to bring the three up together — see [§6.9](#69-scriptdeployssol).
 
 ### 6.1 `WritLib`
 
@@ -539,9 +559,14 @@ registry.
 
 **Constructor.** `constructor(address serving_)`. `serving` is `immutable`. On 0G mainnet it is
 `0x47340d900bdFec2BD393c626E12ea0656F938d84` (chain 16661); on Galileo testnet
-`0xa79F4c8311FF93C06b8CfB403690cc987c93F91E` (chain 16602). It is **not validated** at
-construction — a registry deployed against a wrong address would verify against the wrong
-authority, and the only defence is reading `registry.serving()` after deployment. Do that.
+`0xa79F4c8311FF93C06b8CfB403690cc987c93F91E` (chain 16602). The **zero** address reverts
+`ZeroServing()` — that is the one mistake worth catching here, because it is what a missing
+environment variable produces and it would otherwise deploy a registry that fails silently on every
+proof. **Nothing else is validated:** the constructor does not check that the address is a
+contract, that it implements `getService`, or that it is 0G's. A registry deployed against a wrong
+non-zero address would verify against the wrong authority and look entirely healthy doing it. The
+defence is `script/Deploy.s.sol`, which reads a real service off the address before broadcasting,
+plus reading `registry.serving()` after deployment. Do both.
 
 **Storage.**
 
@@ -549,7 +574,10 @@ authority, and the only defence is reading `registry.serving()` after deployment
 |---:|---|---|
 | 0 | `_writs` | `mapping(bytes32 => Writ)` |
 | 1 | `_routingProofs` | `mapping(bytes32 => RoutingProof)` |
-| 2 | `writCount` | `uint256` |
+| 2 | `_transcriptRoots` | `mapping(bytes32 => bytes32[])` |
+| 3 | `_transcriptSubmitter` | `mapping(bytes32 => mapping(bytes32 => address))` |
+| 4 | `_transcriptQuotaUsed` | `mapping(bytes32 => mapping(address => uint256))` |
+| 5 | `writCount` | `uint256` |
 
 ```solidity
 struct Writ {
@@ -557,16 +585,21 @@ struct Writ {
     bytes32 modelHash;        // +1
     bytes32 reqHash;          // +2
     bytes32 respHash;         // +3
-    bytes32 transcriptRoot;   // +4
-    uint64  notarizedAt;      // +5, offset 0  \ packed together: 8 + 20 = 28 bytes
-    address notarizedBy;      // +5, offset 8  /
+    uint64  notarizedAt;      // +4, offset 0  \ packed together: 8 + 20 = 28 bytes
+    address notarizedBy;      // +4, offset 8  /
 }
 
 struct RoutingProof { string providerType; string providerIdentity; bytes32 tlsFingerprint; }
 ```
 
-Six slots per writ, all written cold in one `notarize` — which is most of the 246,389 gas in
+Five slots per writ, all written cold in one `notarize`, which is most of the cost in
 [§8](#8-measured-gas).
+
+**`Writ` deliberately has no `transcriptRoot` field, and the `Notarized` event carries none.** The
+TEE signs the request and response hashes and nothing else; a root is a claim by whoever published
+it. A field for one sitting beside four verified facts would invite a reader to treat it as a
+fifth. Candidates live in `transcriptRoots`, where they are labelled as claims. See
+[the transcript list](#the-transcript-list-candidates-not-facts) below.
 
 The model **name** is stored only as `keccak256(bytes(model))` and emitted raw in the event, so
 indexers get the string for free while storage stays one slot.
@@ -583,24 +616,36 @@ indexers get the string for free while storage stays one slot.
 | `isRoutingProof(bytes32 id)` | `view` | true iff a `RoutingProof` was stored under `id` |
 | `getWrit(bytes32 id)` | `view` | reverts `NotNotarized` for an unknown id |
 | `getRoutingProof(bytes32 id)` | `view` | reverts `NotARoutingProof` for a chat writ |
-| `notarize(address provider, bytes32 reqHash, bytes32 respHash, bytes calldata signature, bytes32 transcriptRoot)` | — | Format A |
-| `notarizeRoutingProof(address provider, bytes32 reqHash, bytes32 respHash, string calldata providerType, string calldata providerIdentity, bytes32 tlsFingerprint, bytes calldata signature, bytes32 transcriptRoot)` | — | Format B |
+| `MAX_ROOTS_PER_SUBMITTER()` | `view` | `4` |
+| `transcriptRoots(bytes32 id)` | `view` | every candidate pointer, in submission order |
+| `transcriptRootCount(bytes32 id)` | `view` | how many candidates this writ carries |
+| `transcriptRootAt(bytes32 id, uint256 index)` | `view` | `(bytes32 root, address submitter)`; reverts `TranscriptIndexOutOfRange` |
+| `transcriptSubmitter(bytes32 id, bytes32 root)` | `view` | who published a candidate; zero if unlisted |
+| `transcriptQuotaUsed(bytes32 id, address submitter)` | `view` | how much of the 4 this address has spent |
+| `addTranscript(bytes32 id, bytes32 root)` | — | publish another candidate; permissionless |
+| `notarize(address provider, bytes32 reqHash, bytes32 respHash, bytes calldata signature, bytes32 transcriptRoot)` | — | Format A. The root is optional (`bytes32(0)` lists nothing) and goes through `addTranscript`'s door |
+| `notarizeRoutingProof(address provider, bytes32 reqHash, bytes32 respHash, string calldata providerType, string calldata providerIdentity, bytes32 tlsFingerprint, bytes calldata signature, bytes32 transcriptRoot)` | — | Format B, same treatment of the root |
 
 **Events.**
 
 ```solidity
 event Notarized(
     bytes32 indexed id, address indexed provider, bytes32 indexed modelHash,
-    string model, bytes32 reqHash, bytes32 respHash, bytes32 transcriptRoot, address notarizedBy
+    string model, bytes32 reqHash, bytes32 respHash, address notarizedBy
 );
 event RoutingProofNotarized(
     bytes32 indexed id, address indexed provider,
     string providerType, string providerIdentity, bytes32 tlsFingerprint
 );
+event TranscriptAdded(bytes32 indexed id, bytes32 indexed root, address indexed submitter);
 ```
 
-Both are emitted for a routing writ. There is no on-chain enumeration of writ ids —
-`writCount` is a counter, not an index — so an indexer must read `Notarized`.
+`Notarized` carries **no** transcript root: a root is a claim, and it gets its own event so a claim
+is never delivered inside the record of a verified fact. `TranscriptAdded` is emitted for the root
+supplied at notarization too, so following that one event gives an indexer every candidate in
+submission order. Both `Notarized` and `RoutingProofNotarized` are emitted for a routing writ.
+There is no on-chain enumeration of writ ids — `writCount` is a counter, not an index — so an
+indexer must read `Notarized`.
 
 **What `notarize` does, in order.**
 
@@ -615,10 +660,61 @@ Both are emitted for a routing writ. There is no on-chain enumeration of writ id
 6. Revert `BadSignature(recovered, expected)` unless
    `WritLib.recoverSigner(reqHash, respHash, signature) == svc.teeSignerAddress`.
 7. Store the record, `++writCount`, emit `Notarized`.
+8. If `transcriptRoot != bytes32(0)`, append it through the same private `_addTranscript` a later
+   `addTranscript` call uses — attributed to `msg.sender`, against their quota, and emitting
+   `TranscriptAdded`. Being first to record the proof buys no standing over the pointer.
 
 `notarizeRoutingProof` validates both labels first (`_requireLabel`), computes the domain-tagged
 id, then follows the identical checks with `recoverRoutingProofSigner`, stores the `RoutingProof`,
 and emits both events.
+
+#### The transcript list: candidates, not facts
+
+`addTranscript(id, root)` is permissionless, and it has to be. `notarize` is permissionless and
+records are immutable, so a single stored root would mean **whoever notarized first fixed the
+archive pointer forever** — and because the signature endpoint is public and unauthenticated, that
+can be a stranger who learned a chat id, notarized with a junk root, and left the real archivist
+with nowhere to put the true one. Appending makes a wrong first root noise rather than damage.
+
+Three rules, all O(1) because the list they touch is unbounded and a scan would itself be
+griefable:
+
+- `bytes32(0)` is not a pointer, it is the absence of one. `TranscriptRootEmpty()`.
+- A root already listed on this writ is rejected — `TranscriptAlreadyListed(root)` — so a griefer
+  cannot pad the list with one value. The submitter mapping being non-zero doubles as "already
+  listed".
+- Each **address** may publish at most `MAX_ROOTS_PER_SUBMITTER = 4` per writ.
+  `TranscriptQuotaUsed(submitter, quota)`. A rejected call spends no quota.
+
+**The quota is per submitter, not a cap on the list, and that choice is the whole defence.** A
+global cap plus permissionless writes cannot both be safe: a griefer spends the entire list on
+distinct junk roots and the real archivist is locked out forever — which is the front-running this
+mechanism exists to defeat, only worse. With a per-address quota a griefer exhausts nothing but
+their own, and every honest publisher always has room.
+`test_aGrieferCannotDenyTheRealArchivistASlot` and `test_aFrontRunnersJunkRootDoesNotShutOutTheRealOne`
+pin both halves.
+
+**The cost is real and stated in [§6.3's limitations](#deliberate-non-checks-stated-plainly): the
+list is unbounded by design.** One attacker with N addresses can publish 4N candidates. Nobody is
+denied a slot — that was the actual attack — but `transcriptRoots(id)` can be grown until loading
+it whole is expensive. That is exactly why `transcriptRootCount` and `transcriptRootAt` exist: a
+caller that cannot bound its own gas walks the list instead of loading it. Bounding the list at all
+reintroduces the lockout.
+
+**How a reader uses it.** Try candidates in submission order; fetch the transcript each points at;
+check that its request and response bytes `sha256` to the writ's `reqHash` and `respHash`; stop at
+the first that re-derives. A candidate that fails is somebody's junk and says nothing about the
+writ — the writ was verified by signature recovery against 0G's registered TEE signer,
+independently of every pointer. `transcriptSubmitter` says whose claim a failed candidate was,
+which is attribution, not endorsement.
+
+**`unavailable` is not `fail`, and the distinction is load-bearing.** A candidate that does not
+re-derive is a failed claim by whoever published it, not evidence against the writ. Grading it as a
+failure is precisely the hole a front-runner would drive through: publish junk first and a sound
+writ *reads as broken*. So a consumer that exhausts every candidate without one verifying must
+report **`unavailable`, with a reason** — never a pass, and never a fallback to some weaker check.
+The archive is a convenience for reconstructing the bytes; it is not, and must never become, part
+of the trust chain.
 
 **Domain separation.** `routingWritId` hashes
 `keccak256("writ.routingProof.v1")` alongside the provider, both hashes, `keccak256` of each label
@@ -631,23 +727,36 @@ different things, and the routing proof names an upstream the chat proof says no
 
 | Error | Trigger |
 |---|---|
+| `ZeroServing()` | `constructor(address(0))` |
 | `AlreadyNotarized(bytes32 id)` | this exact proof is already recorded. Re-notarizing is a loud failure, not a silent no-op — callers that only need the record to exist check `isNotarized` first |
 | `SignerNotAcknowledged(address provider)` | `svc.teeSignerAcknowledged == false`. Three live mainnet TeeML services are in this state today |
 | `NotTeeVerifiable(address provider, string verifiability)` | `svc.verifiability != "TeeML"`. This is what rejects the two live services 0G serves with `verifiability: "standard"` and no TEE (`0x1F444c8A…`, `0xd3f02c1a…`) |
 | `BadSignature(address recovered, address expected)` | the recovered address is not the provider's registered `teeSignerAddress`. Covers a forged signature, a tampered request hash, a tampered response hash, and a proof in the wrong format |
-| `NotNotarized(bytes32 id)` | `getWrit` on an id that was never recorded |
+| `NotNotarized(bytes32 id)` | `getWrit` on an id that was never recorded, or `addTranscript` for a writ that does not exist |
 | `NotARoutingProof(bytes32 id)` | `getRoutingProof` on a chat writ |
 | `RoutingFieldEmpty()` | `providerType` or `providerIdentity` is the empty string |
 | `RoutingFieldTooLong(uint256 length)` | either label exceeds `MAX_ROUTING_FIELD` (32 bytes) |
 | `RoutingFieldHasDelimiter()` | either label contains `:` |
+| `TranscriptRootEmpty()` | `addTranscript` with `bytes32(0)`. `notarize` treats a zero root as "no pointer" and lists nothing instead of reverting |
+| `TranscriptAlreadyListed(bytes32 root)` | this root is already a candidate on this writ, from any submitter |
+| `TranscriptQuotaUsed(address submitter, uint256 quota)` | this address has already published `MAX_ROOTS_PER_SUBMITTER` candidates for this writ |
+| `TranscriptIndexOutOfRange(uint256 index, uint256 length)` | `transcriptRootAt` past the end |
 | `IInferenceServing.ServiceNotExist(address provider)` | raised by 0G's own contract and propagated: the provider has never registered a service |
 | `ECDSAInvalidSignature()` / `ECDSAInvalidSignatureLength(uint256)` / `ECDSAInvalidSignatureS(bytes32)` | propagated from `ECDSA.recover` for a structurally invalid signature |
 
+<a id="deliberate-non-checks-stated-plainly"></a>
+
 **Deliberate non-checks, stated plainly.**
 
-- **`transcriptRoot` is not verified and is not covered by the TEE signature.** It is an opaque
-  `bytes32` the notarizer chooses. Because notarization is permissionless and the record is
-  immutable, whoever notarizes first fixes it forever. See `CLAIMS.md`.
+- **A transcript root is not verified and is not covered by the TEE signature.** It is an opaque
+  `bytes32` some address published, and this contract has no way to check one. It is kept out of
+  `Writ` and out of `Notarized` for exactly that reason. See `CLAIMS.md`.
+- **The transcript list is unbounded, by design.** The per-submitter quota trades a lockout for
+  growth. One attacker with N addresses can publish 4N candidates, so `transcriptRoots(id)` can be
+  grown until loading it whole is expensive — walk it with `transcriptRootCount` and
+  `transcriptRootAt` instead. Bounding the list at all reintroduces the lockout that the quota
+  exists to prevent, which is the worse failure: unbounded reads cost gas, a permanent lockout
+  costs the archive.
 - **`additionalInfo` is not parsed.** The signature already binds `providerType` and
   `providerIdentity`, so cross-checking them against the service's JSON on chain would add attack
   surface for no security gain.
@@ -689,6 +798,13 @@ struct Decision { bytes32 id; bool approved; uint8 risk; Refusal refusedBy; }
 `_consumeRoutingProof` over the stack limit, and a struct lets a field be added later without
 silently changing what an existing destructuring binds.
 
+**`allowedModelHash` is still a hash in the `Policy` struct, but nothing may set it independently
+any more.** Everything that builds a gate — `PolicyGateFactory` and `AgentTreasury` — takes a model
+*name*, writes `{"model":"<name>",` into `promptHead` from it, and derives `allowedModelHash` from
+that same string. `PolicyGate` itself never reads the prompt, so a gate whose two halves disagreed
+would ask about one model and accept an answer from another with every check passing. See
+[§6.8 `PromptLib`](#68-promptlib).
+
 **External / public interface.**
 
 | Function | Mutability | Notes |
@@ -704,8 +820,11 @@ silently changing what an existing destructuring binds.
 | Function | Notes |
 |---|---|
 | `_setPolicy(uint256 policyId, Policy memory p)` | called only from a constructor in this codebase |
-| `_consume(policyId, params, rawResponse, provider, signature, transcriptRoot)` | Format A path |
-| `_consumeRoutingProof(policyId, params, rawResponse, provider, routing, signature, transcriptRoot)` | Format B path |
+| `_consume(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider)` | Format A path |
+| `_consumeRoutingProof(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider, WritRegistry.RoutingProof calldata routing)` | Format B path |
+
+**Neither takes a signature, and neither can notarize.** That is the shape of the guarantee, not a
+convenience: see [below](#the-writ-must-already-exist).
 
 **`buildRequestBody` is the single source of truth for the question.** Clients call it and post the
 returned bytes verbatim. They must never rebuild the body themselves — that is what makes
@@ -717,14 +836,29 @@ client/contract byte-drift structurally impossible rather than merely tested for
    `ProviderNotAllowed(got, want)` if the policy names a provider and this is not it; compute
    `reqHash = sha256(buildRequestBody(policyId, params))` and `respHash = sha256(rawResponse)`.
 2. `id = decisionKey(provider, reqHash, respHash)`; revert `WritAlreadyConsumed(id)` if spent.
-3. If `!registry.isNotarized(id)`, call `registry.notarize(...)`. Notarizing is a public good and
-   someone else may already have done it; consuming must not depend on being first.
-4. `_decide`: read the writ back, revert `ModelNotAllowed(got, want)` if `w.modelHash` is not the
-   policy's, parse the verdict (reverting on malformed), mark `consumed[decision] = true`, and
-   return a `Decision`.
+3. Revert `WritNotNotarized(id)` if `!registry.isNotarized(id)`. The proof has to be on the
+   registry already, in an earlier transaction.
+4. `_decide`: read the writ back with `registry.getWrit(id)`, revert `ModelNotAllowed(got, want)`
+   if `w.modelHash` is not the policy's, parse the verdict (reverting on malformed), mark
+   `consumed[decision] = true`, and return a `Decision`.
 
-`_consumeRoutingProof` is identical except that the record is created under `routingWritId` while
+`_consumeRoutingProof` is identical except that it looks the record up under `routingWritId` while
 the decision is still spent under `decisionKey`.
+
+<a id="the-writ-must-already-exist"></a>
+
+**The writ must already exist, and that ordering is structural.** A gate that notarized inline
+would put the permanent record and the guarded action in one transaction. An approval whose payout
+reverted would then roll the record back with it — so refusals would be permanent and *failed
+approvals would leave nothing*, which is the exact asymmetry that falsifies "every decision is
+recorded forever". Notarizing separately makes every decision — approved, refused, or
+approved-but-unpayable — equally permanent, and it is why `_consume` has no signature argument to
+notarize with. `AgentTreasury.t.sol::test_aRevertingRecipientLeavesTheNotarizationIntact` pins it:
+the settlement rolls back, the writ and its transcript candidate do not, and the decision is not
+marked consumed.
+
+Consuming does not require having been the notarizer. Notarizing is a public good and someone else
+may already have done it — `PolicyGate.t.sol::test_consumesAProofSomeoneElseNotarized`.
 
 **Why the decision key is not the writ id.** A provider, a question and an answer make **one**
 decision, and the same decision can arrive proved in either format. Those are two distinct writs in
@@ -754,12 +888,28 @@ pins that.
 | `ProviderNotAllowed(address got, address want)` | policy names a specific provider and the proof is from a different one |
 | `ModelNotAllowed(bytes32 got, bytes32 want)` | the notarized writ's `modelHash` is not the policy's `allowedModelHash` |
 | `WritAlreadyConsumed(bytes32 id)` | this decision has already been spent under `decisionKey`, in either format |
+| `WritNotNotarized(bytes32 id)` | the proof is not on the registry. Notarize it first, in its own transaction |
 | plus everything `WritRegistry` and `VerdictLib` can raise | propagated |
 
-**A limitation stated here rather than discovered later.** Once a writ is notarized, `PolicyGate`
-does not re-check the signature it was handed — it trusts the registry's record, which was verified
-when it was made. That is correct, and it is what makes step 3 skippable. It also means a
-signature argument is simply unused when the writ already exists.
+<a id="what-the-gate-checks-and-when"></a>
+
+**What the gate checks, and when.** `PolicyGate` reads a record; it does not re-verify one. The TEE
+signature, the provider's `TeeML` verifiability and 0G's acknowledgement of its signer are all
+checked **once**, by `WritRegistry`, at the moment the proof is recorded. They are not read again
+here, and there is no signature argument to read them against.
+
+**That is the design, not a shortcut.** A permanent record is a statement about a moment. Consuming
+a writ deliberately does not recheck the provider's live standing, because a permanent record means
+the check happened once, at recording time — re-deriving it later would mean a writ's meaning
+changed with the registry's later state. A proof recorded while 0G vouched for its provider stays a
+proof of what that provider signed, whatever 0G says afterwards.
+
+So read the model check for what it is: the gate enforces that the recorded writ names this
+policy's provider and model and that its answer obeys the verdict grammar. It does **not** enforce
+that 0G still acknowledges that provider today.
+`PolicyGate.t.sol::test_consumingDoesNotRecheckTheProvidersLiveStanding` pins the behaviour
+directly — the provider is downgraded to `verifiability: "standard"` and unacknowledged *after*
+notarization, and the writ still consumes.
 
 ### 6.5 `TreasuryGate`
 
@@ -798,14 +948,19 @@ are facts the pinned question reports.
 |---|---|---|
 | `agent()`, `owner()`, `nonce()`, `approvedCount()`, `refusedCount()`, `lastAttestationAt()` | `view` | |
 | `recipientHistory(address)` | `view` | `(uint64 payments, uint192 total)` |
-| `POLICY_ID()`, `RECOVERY_DELAY()` | `pure`/`view` | |
+| `POLICY_ID()`, `RECOVERY_DELAY()` | `view` | constant getters; solc marks them `view`, not `pure` |
 | `recoveryAvailableAt()` | `view` | `lastAttestationAt + RECOVERY_DELAY` |
 | `buildParams(address to, uint256 amount)` | `view virtual` | the nine facts |
 | `previewRequestBody(address to, uint256 amount)` | `view` | the exact bytes to post |
-| `execute(address to, uint256 amount, bytes rawResponse, address provider, bytes signature, bytes32 transcriptRoot)` | `nonReentrant` | Format A |
-| `executeRoutingProof(address to, uint256 amount, bytes rawResponse, address provider, WritRegistry.RoutingProof routing, bytes signature, bytes32 transcriptRoot)` | `nonReentrant` | Format B |
+| `execute(address to, uint256 amount, bytes calldata rawResponse, address provider)` | `nonReentrant` | Format A |
+| `executeRoutingProof(address to, uint256 amount, bytes calldata rawResponse, address provider, WritRegistry.RoutingProof calldata routing)` | `nonReentrant` | Format B |
 | `recover(address to)` | `nonReentrant` | owner-only, timelocked |
 | `receive()` | `payable` | anyone may fund the treasury |
+
+**Neither entry point takes a signature or a transcript root, and neither notarizes.** The proof
+must already be on the registry, put there in an earlier transaction — otherwise the call reverts
+`WritNotNotarized(id)`. Those two trailing arguments were removed when notarization left the settle
+path; a caller still passing them is calling a function that no longer exists.
 
 `execute` and `executeRoutingProof` return `bool approved`, but **a return value is not readable
 from a mined transaction** — read `TransferApproved` / `TransferRefused` from the receipt instead.
@@ -871,21 +1026,36 @@ constructor(
     WritRegistry registry_,
     address agent_,
     address owner_,
-    bytes32 allowedModelHash,
+    string memory modelName,
     address allowedProvider,
     uint8 maxRisk
 )
 ```
 
+**Position 4 is a model NAME, not a hash.** This contract used to spell its model inside
+`promptHead` and take `allowedModelHash` as a separate argument, which let the two halves of the
+gate disagree. It now builds through `PromptLib` exactly as `PolicyGateFactory` does: one string is
+written into the question and hashed for the policy, so there is nothing left to disagree. The
+constant that held the literal model id — `PROMPT_MODEL`, and the exported
+`AGENT_TREASURY_PROMPT_MODEL` beside it — no longer exists, and the deploy script's
+`ModelIsNotTheOneThePromptNames` guard was removed because it became structurally unable to fire.
+
 Only the model, provider and risk ceiling are configurable. `promptHead` and `promptTail` are
-literals in `contracts/src/examples/AgentTreasury.sol` — reproduced in full in
-[§5](#5-the-nine-fact-question).
+`private constant` literals in `contracts/src/examples/AgentTreasury.sol`, and what the contract
+stores is `PromptLib.buildPromptHead(modelName, PROMPT_HEAD, PROMPT_TAIL)` — the model key spliced
+ahead of the literal head. `PROMPT_HEAD` itself begins at `"temperature":0,"messages":[…`; the
+opening `{"model":"<modelName>",` is contributed by `PromptLib`. The assembled body is reproduced
+in full in [§5](#5-the-nine-fact-question).
+
+Both literals go through the same `"model"`-key scan a factory caller's bytes do. They are trusted
+bytes, but a rule that skipped its own author is a rule with an exception in it.
 
 The system half of the prompt exists to make the derived facts legible to the model: without being
 told what `amountPctOfBalance` means, a model cannot act on it. The answer grammar stays exactly
 `ALLOW:<0-100>` / `DENY:<0-100>`, because `VerdictLib` accepts nothing else.
 
-**Interface, errors, storage.** Identical to `TreasuryGate`; it adds nothing.
+**Interface, errors, storage.** Identical to `TreasuryGate`, plus the `PromptLib` errors its
+constructor can raise. It adds no functions and no storage.
 
 ### 6.7 `PolicyGateFactory`
 
@@ -905,13 +1075,38 @@ gate this factory deploys verifies against that registry.
 
 **Interface.**
 
+```solidity
+struct GateSpec {
+    string  modelName;
+    bytes   promptHead;
+    bytes   promptTail;
+    address allowedProvider;   // address(0) = any acknowledged TeeML provider
+    uint8   maxRisk;
+}
+```
+
 | Function | Notes |
 |---|---|
-| `deployGate(PolicyGate.Policy calldata p, address agent, address owner) returns (address gate)` | deploys a `TreasuryGate` |
+| `deployGate(GateSpec calldata spec, address agent, address owner) returns (address gate)` | deploys a `TreasuryGate` |
+| `buildPromptHead(string memory modelName, bytes memory promptHead) pure returns (bytes)` | previews the exact splice `deployGate` will store, without validating |
 | `gatesOf(address owner) view returns (address[])` | indexed by the owner **named at deployment**, not by the sender |
 | `gateCount() view returns (uint256)` | |
 | `allGates(uint256) view returns (address)` | |
 | `registry() view returns (address)` | |
+
+**`GateSpec` takes a model NAME. There is no `allowedModelHash` argument any more, and that closed
+a real defect.** A caller used to supply the pinned JSON on one side and `allowedModelHash` on the
+other, so a gate could **ask about one model and accept an answer from another** while every check
+passed — `PolicyGate` compares the hash against 0G's registry and never reads the prompt, so
+nothing on chain could reconcile them afterwards. Now one string decides both halves: the factory
+writes `{"model":"<modelName>",` itself, the caller's `promptHead` continues from there, and
+`allowedModelHash = keccak256(bytes(spec.modelName))`. The mismatch is unrepresentable rather than
+validated. `PolicyGateFactory.t.sol::test_theModelInTheQuestionIsTheModelTheGateAccepts` and
+`test_aDeployedGateRefusesAWritForADifferentModel` pin both directions.
+
+`buildPromptHead` is `pure` and `public` so a caller can read the exact question before paying for
+the gate that asks it. It previews rather than validates — `deployGate` runs the checks, and a
+preview that reverted would tell a caller less than the bytes it refused to show them.
 
 **Event.** `GateDeployed(address indexed gate, address indexed owner, address indexed deployer, bytes32 modelHash)`.
 `owner` holds the gate's recovery hatch; `deployer` merely paid. They are usually the same account,
@@ -921,16 +1116,106 @@ and the distinction only matters when they are not.
 
 | Error | Trigger |
 |---|---|
-| `EmptyPrompt()` | `p.promptHead.length == 0` — an empty head is also how `PolicyGate` recognises an unknown policy, so it must be rejected here |
+| `EmptyPrompt()` | `spec.promptHead.length == 0` — an empty head is also how `PolicyGate` recognises an unknown policy, so it must be rejected here |
 | `ZeroAgent()` | `agent == address(0)` |
 | `ZeroOwner()` | `owner == address(0)`. Named explicitly rather than defaulted to `msg.sender`, because deploying a gate on someone else's behalf would otherwise hand the deployer a claim on funds they do not own |
-| `RiskCeilingTooHigh(uint8 maxRisk)` | `maxRisk > 100` — a ceiling above 100 would wave through every verdict the grammar can express |
+| `RiskCeilingTooHigh(uint8 maxRisk)` | `spec.maxRisk > 100` — a ceiling above 100 would wave through every verdict the grammar can express |
+| `PromptLib.ModelNameEmpty()` / `ModelNameTooLong(uint256)` / `ModelNameHasIllegalByte(uint256)` / `ModelKeyInPrompt()` | propagated from the splice — see [§6.8](#68-promptlib) |
 
 **What the factory does not validate.** It does not and cannot check that `promptHead`/`promptTail`
-form valid JSON, that the prompt describes the `ALLOW:`/`DENY:` grammar, that
-`allowedModelHash` names a model any provider serves, or that the assembled body is something a
-provider will accept. A malformed policy produces a gate that simply never gets a usable answer.
-That harms only its deployer, but it is not a checked property and `CLAIMS.md` says so.
+form valid JSON, that the prompt describes the `ALLOW:`/`DENY:` grammar, that `modelName` is a
+model any provider actually serves, or that the assembled body is something a provider will accept.
+A malformed policy produces a gate that simply never gets a usable answer. That harms only its
+deployer, but it is not a checked property and `CLAIMS.md` says so.
+
+### 6.8 `PromptLib`
+
+**Responsibility.** Own the `"model"`-key splice and guard it. One implementation, shared by
+`PolicyGateFactory` and `AgentTreasury`, because two copies of this rule is how the original
+mismatch defect happened.
+
+**Interface** (all `internal pure`):
+
+| Function | Notes |
+|---|---|
+| `spliceModelKey(string modelName, bytes promptHead)` | `abi.encodePacked('{"model":"', modelName, '",', promptHead)`. No checks — this is the splice itself, exposed so a preview cannot revert |
+| `buildPromptHead(string modelName, bytes promptHead, bytes promptTail)` | checks, then splices. What a gate is actually built through |
+| `requireModelName(string modelName)` | the name check on its own, so a deploy script can run it before broadcasting |
+| `requireNoModelKey(bytes prompt)` | the `"model"` scan on its own |
+
+**Constant.** `MAX_MODEL_NAME = 64`.
+
+**Error table.**
+
+| Error | Trigger |
+|---|---|
+| `ModelNameEmpty()` | zero-length model name |
+| `ModelNameTooLong(uint256 length)` | over `MAX_MODEL_NAME` |
+| `ModelNameHasIllegalByte(uint256 index)` | the name contains `"` (`0x22`), `\` (`0x5C`), or any byte below `0x20` |
+| `ModelKeyInPrompt()` | the seven bytes `"model"` appear anywhere in the caller's head **or tail** |
+
+**Why the name check is what it is.** The name is spliced into a JSON string literal, so anything
+that could end that literal early would let the rest be read as structure — an author could rewrite
+the messages array from inside what looks like a model name. The two bytes that do that are `"` and
+`\`; control bytes are rejected because a JSON string may not carry them raw anyway.
+`Deploy.t.sol::test_refusesAModelNameThatCannotBeSpliced` runs a live provider's model name of
+`x","messages":[` through the whole deployment and shows it aborting before the broadcast.
+
+**Why the tail is scanned too.** The tail is the other half of the author's JSON and a second
+`"model"` key hides there just as easily. JSON leaves duplicate keys to the parser, so a second one
+could win and the provider would run a model the gate never named.
+`PolicyGateFactory.t.sol::test_refusesAModelKeyInTheCallersPromptTail` covers it.
+
+<a id="the-model-scan-is-a-byte-scan"></a>
+
+**Be exact about the strength of the `"model"` scan: it is a byte scan, not a JSON parser.** An
+escaped spelling passes it. `requireNoModelKey` looks for exactly the seven bytes
+`0x22 6D 6F 64 65 6C 22`. A JSON key written `"\u006dodel"` is twelve different bytes
+containing none of that needle, and yet every JSON parser resolves it to the key `model`. The scan
+misses it.
+
+**What makes that survivable is structural, not the check.** `allowedModelHash` comes from
+`modelName` alone. So a smuggled key can make a provider run something else, but the writ then
+carries the *other* model's hash and the gate refuses every one of them — the result is a **dead**
+gate, not a lying one. The scan exists to catch the accident and the obvious attempt; the guarantee
+is the shared string. Do not read the scan as a guarantee, because it is not one.
+
+### 6.9 `script/Deploy.s.sol`
+
+Not a deployed contract — the deployment itself, and the only supported way to bring the three up
+together. Earlier revisions of this document said no deploy script existed; one does now.
+
+**What it does, in order.**
+
+1. `config()` reads every setting from the environment: `INFERENCE_SERVING`, `TEE_PROVIDER`,
+   `AGENT_ADDRESS`, `OWNER_ADDRESS`, `MAX_RISK`, `DEPLOYER_PRIVATE_KEY`. A missing variable aborts
+   here, before anything is deployed.
+2. Rejects a zero agent, a zero owner, and `maxRisk > 100`.
+3. Reads **0G's live registry** for the configured provider — `getService`, which reverts
+   `ServiceNotExist` for one it has never seen — and requires `teeSignerAcknowledged` and
+   `verifiability == "TeeML"`. **This happens before the broadcast.** A gate pointed at a provider
+   that cannot produce verifiable proofs is not a degraded deployment, it is a dead one: no proof
+   it ever sees will notarize, so the treasury is bricked from birth and the only way out is the
+   30-day hatch.
+4. Runs `PromptLib.requireModelName(svc.model)` ahead of the broadcast, so a provider whose model
+   name cannot be spliced costs nothing rather than reverting on the third of three deployments.
+5. Broadcasts `WritRegistry`, then `PolicyGateFactory`, then one `AgentTreasury`.
+
+**The treasury is pinned to the model 0G reports this provider serving**, read live, not to a
+constant written in the script — a stale name would refuse every proof the provider produces. That
+one name becomes both halves of the gate, so there is no second argument left to disagree with it
+and no deploy-time reconciliation check needed. `Deploy.t.sol::test_followsTheProviderOntoADifferentModel`
+pins that the script follows the registry rather than a hardcoded name.
+
+Dry run first — it costs nothing and touches nothing:
+
+```bash
+forge script script/Deploy.s.sol --fork-url https://evmrpc.0g.ai
+```
+
+Add `--broadcast` only when the deployer is funded and the dry run reads right. Eleven tests in
+`contracts/test/Deploy.t.sol` drive `deploy(Config)` directly, so the checks are exercised without
+going through the process environment.
 
 ---
 
@@ -963,22 +1248,32 @@ sequenceDiagram
 
     Agent->>Agent: verify locally — rebuild the text from sha256<br/>of the bytes it actually sent and received,<br/>recover against the on-chain teeSignerAddress
     Agent->>Store: upload transcript<br/>request, response, hashes, signed text, signature
-    Store-->>Agent: merkle root
+    Store-->>Agent: merkle root — a CANDIDATE pointer,<br/>attested by nothing
 
+    rect rgba(40,110,180,0.10)
+    Note over Agent,Reg: TRANSACTION 1 — the record
     Agent->>Reg: notarize(provider, reqHash, respHash, signature, root)
     Reg->>Serving: getService(provider) — live staticcall
     Serving-->>Reg: model, verifiability, teeSignerAddress, teeSignerAcknowledged
     Note over Reg: require TeeML · require acknowledged ·<br/>rebuild the 129 bytes · ECDSA.recover<br/>equals teeSignerAddress
-    Reg-->>Agent: writId, event Notarized
+    Reg-->>Agent: writId · event Notarized (no root) ·<br/>event TranscriptAdded (the root)
+    end
 
-    Agent->>Gate: execute(to, amount, rawResponse, provider, signature, root)
+    rect rgba(40,140,90,0.10)
+    Note over Agent,Dest: TRANSACTION 2 — the action
+    Agent->>Gate: execute(to, amount, rawResponse, provider)
+    Note over Gate: no signature argument, and no root:<br/>this call cannot notarize anything
     Note over Gate: rebuilds ITS OWN question from ITS OWN state<br/>reqHash = sha256(buildRequestBody(...))<br/>respHash = sha256(rawResponse)
-    Gate->>Reg: isNotarized(decisionKey), then getWrit(id)
+    Gate->>Reg: isNotarized(decisionKey) — must be true,<br/>else revert WritNotNotarized
+    Gate->>Reg: getWrit(id)
     Reg-->>Gate: the recorded writ, including modelHash
     Note over Gate: modelHash matches the policy ·<br/>VerdictLib.parseVerdict reads ALLOW risk 12 ·<br/>12 is within maxRisk, so approved
     Gate->>Gate: mark the decision consumed ·<br/>advance the nonce · count the approval
     Gate-->>Agent: event TransferApproved
     Gate->>Dest: value transfer
+    end
+
+    Note over Reg,Dest: If the transfer reverts, TRANSACTION 2 rolls back<br/>and TRANSACTION 1 does not. The record survives<br/>a failed approval exactly as it survives a refusal.
 ```
 
 ### 7.2 The prompt-swap attack, rejected
@@ -1003,54 +1298,111 @@ sequenceDiagram
     Attacker->>TEE: GET /v1/proxy/signature/chatId
     TEE-->>Attacker: a REAL, VALID signature
 
+    Note over Attacker: The proof is genuine, so it DOES record —<br/>as an answer to the attacker's own question,<br/>under the attacker's own reqHash.
+    Attacker->>Reg: notarize(provider, sha256(attackerReq),<br/>sha256(resp), that signature, root)
+    Reg-->>Attacker: recorded. A true writ about a useless question.
+
     rect rgba(180,40,40,0.10)
-    Attacker->>Gate: execute(attackerAddr, 10 0G, that response,<br/>provider, that signature, root)
-    Note over Gate: reqHash = sha256 of buildRequestBody over<br/>buildParams(attackerAddr, 10 0G) —<br/>the TREASURY question, not the attacker's
-    Gate->>Reg: isNotarized(decisionKey) — false, so notarize
+    Note over Attacker,Serving: Attempt 1 — record it under the GATE's question
+    Attacker->>Reg: notarize(provider, sha256(treasuryReq),<br/>sha256(resp), that same signature, root)
     Reg->>Serving: getService(provider)
     Serving-->>Reg: teeSignerAddress 0x8561E0…
     Note over Reg: rebuilds the 129 bytes from the GATE's reqHash,<br/>but the signature covers the ATTACKER's request,<br/>so recovery yields a different address
-    Reg--xGate: revert BadSignature — recovered, expected
-    Gate--xAttacker: whole transaction reverts · no funds move
+    Reg--xAttacker: revert BadSignature — recovered, expected
     end
 
-    Note over Attacker,Serving: The signature was real. The model's answer was real.<br/>Neither was an answer to the question this gate asks.
+    rect rgba(180,40,40,0.10)
+    Note over Attacker,Gate: Attempt 2 — settle against the writ that DID record
+    Attacker->>Gate: execute(attackerAddr, 10 0G, that response, provider)
+    Note over Gate: reqHash = sha256 of buildRequestBody over<br/>buildParams(attackerAddr, 10 0G) —<br/>the TREASURY question, not the attacker's
+    Gate->>Reg: isNotarized(decisionKey over the TREASURY reqHash)
+    Reg-->>Gate: false — that decision was never recorded
+    Gate--xAttacker: revert WritNotNotarized(id) · no funds move
+    end
+
+    Note over Attacker,Serving: The signature was real. The model's answer was real.<br/>Neither was an answer to the question this gate asks.<br/>The attacker's writ exists and is true; it is simply<br/>not the writ this gate looks for.
 ```
 
-The same shape rejects a tampered response (`control-altered-response`), a forged signer
-(`control-forged-signer-chain`), an understated balance (`trap-understated-balance`), a forged
-recipient history (`trap-forged-recipient-history`), a stale nonce, and a proof for a treasury
-state that has since moved (`trap-stale-treasury-state`). All of them land on the same
-`BadSignature`, because all of them amount to the same thing: the hashes the gate pins are not the
-hashes that were signed. See `EVAL.md`.
+`AgentTreasury.t.sol::test_refusesPromptSwap` runs exactly those three steps, including the
+successful notarization of the attacker's own proof. The same shape rejects a tampered response
+(`control-altered-response`), a forged signer (`control-forged-signer-chain`), an understated
+balance (`trap-understated-balance`), a forged recipient history
+(`trap-forged-recipient-history`), a stale nonce, and a proof for a treasury state that has since
+moved (`trap-stale-treasury-state`). See `EVAL.md`.
+
+**Where they land depends on where they are caught, and the split is worth knowing.** Anything that
+alters what was *signed* — a forged key, a tampered hash, a swapped question — fails at
+`WritRegistry.notarize` with `BadSignature`, because the hashes being rebuilt are not the hashes
+that were signed. Anything that then tries to settle without a record fails at the gate with
+`WritNotNotarized`. The gate itself no longer has a `BadSignature` path to reach, because it no
+longer verifies signatures.
 
 ---
 
 ## 8. Measured gas
 
-Measured 2026-08-26. Unless a row says otherwise, the `InferenceServing` read goes to
+**Every figure in this section was regenerated on 2026-08-26 against the current contracts with
+`forge build --force && forge test --gas-report`. Two earlier sets of numbers have been superseded
+— once when notarization left the settle path, and once when the transcript root became an
+append-only list. Do not carry a gas figure over from an older revision of this document.**
+
+Unless a row says otherwise, the `InferenceServing` read goes to
 `test/mocks/MockInferenceServing.sol`, so these are **lower bounds** — 0G's real registry returns a
 much larger struct and costs more to read.
+
+The `test_measures*` figures are `gasleft()` deltas taken across an external call from the test
+frame, so each is slightly above the same function's row in `--gas-report`, which excludes the
+caller's own overhead. Both are given where they differ.
 
 | Operation | Gas | Where it is measured |
 |---|---:|---|
 | `WritLib.recoverSigner` (Format A, through an external harness call) | **47,209** | `WritLib.t.sol::test_measuresVerificationGas` |
 | `WritLib.recoverRoutingProofSigner` (Format B) | **69,337** | `WritLib.t.sol::test_measuresRoutingProofVerificationGas` |
-| `WritRegistry.notarize`, cold | **246,389** | `WritRegistry.t.sol::test_measuresNotarizeGas` |
-| `WritRegistry.notarizeRoutingProof`, cold | **343,819** | `WritRegistry.t.sol::test_measuresRoutingNotarizeGas` |
-| `TreasuryGate.execute`, approved (notarizes inline, then transfers) | **399,533** | `AgentTreasury.t.sol::test_measuresExecuteGas` |
-| `TreasuryGate.execute`, refused (notarizes inline, records the refusal) | **344,549** | `AgentTreasury.t.sol::test_measuresRefusalGas` |
-| `TreasuryGate.executeRoutingProof`, approved | **501,311** | `AgentTreasury.t.sol::test_measuresRoutingProofExecuteGas` |
-| `previewRequestBody` (`view`) | ~84,505 | `--gas-report` |
-| `buildParams` (`view`) | ~29,252 avg | `--gas-report` |
-| `AgentTreasury` deployment | 3,079,426 | `--gas-report` |
+| `WritRegistry.notarize`, cold, **with** a transcript root | **339,161** | `WritRegistry.t.sol::test_measuresNotarizeGas` |
+| `WritRegistry.notarizeRoutingProof`, cold, with a root | **438,152** | `WritRegistry.t.sol::test_measuresRoutingNotarizeGas` |
+| `WritRegistry.addTranscript`, one further candidate | **81,808** | `WritRegistry.t.sol::test_measuresAddTranscriptGas` |
+| `AgentTreasury.execute`, approved — **reads a writ, transfers; notarizes nothing** | **267,579** | `AgentTreasury.t.sol::test_measuresExecuteGas` |
+| `AgentTreasury.execute`, refused — reads a writ, records the refusal | **212,583** | `AgentTreasury.t.sol::test_measuresRefusalGas` |
+| `AgentTreasury.executeRoutingProof`, approved | **273,472** | `AgentTreasury.t.sol::test_measuresRoutingProofExecuteGas` |
 
-**Against the real registry, on a mainnet fork:**
+From `--gas-report` (function-body cost, all calls in the suite):
+
+| Function | Min | Median | Max |
+|---|---:|---:|---:|
+| `WritRegistry.notarize` | 27,383 | 242,137 | 333,448 |
+| `WritRegistry.notarizeRoutingProof` | 26,544 | 340,363 | 431,662 |
+| `WritRegistry.addTranscript` | 24,307 | 81,326 | 115,520 |
+| `WritRegistry.getWrit` | 9,520 | 9,520 | 11,520 |
+| `WritRegistry.isNotarized` | 2,584 | 2,584 | 2,584 |
+| `AgentTreasury.execute` | 28,797 | 189,208 | 260,001 |
+| `AgentTreasury.executeRoutingProof` | 30,550 | 130,845 | 264,894 |
+| `AgentTreasury.previewRequestBody` (`view`) | 82,727 | 84,505 | 85,808 |
+| `AgentTreasury.buildParams` (`view`) | 25,940 | 29,210 | 30,509 |
+
+The minima are reverting calls, which is why they are small; the maxima are cold-storage paths.
+
+**Deployment cost** (`--gas-report`, optimizer on at 200 runs):
+
+| Contract | Deployment gas | Runtime size (bytes) |
+|---|---:|---:|
+| `WritRegistry` | 1,827,652 | 8,409 |
+| `PolicyGateFactory` | 3,245,080 | 14,957 |
+| `TreasuryGate` (deployed directly, not through the factory) | 2,581,551 | 12,236 |
+| `AgentTreasury` | 3,223,947 | 13,318 |
+
+`PolicyGateFactory.deployGate` costs 2,540,262 gas at the median — it deploys a whole
+`TreasuryGate` and copies the policy into its storage.
+
+**Against the real registry, on a mainnet fork** (whole-test gas including the test's own
+assertions, which is the only honest way to label these — the fork suite measures behaviour, not
+gas):
 
 | Measurement | Gas |
 |---|---:|
-| one live `InferenceServing.getService` plus the test's assertions | 79,689 |
-| `WritRegistry.notarize` reaching `BadSignature` through the live registry | 133,427 |
+| one live `InferenceServing.getService` plus the test's assertions (`test_liveTeeProviderIsAcknowledgedAndTeeML`) | 82,189 |
+| `notarize` reaching `BadSignature` through the live registry (`test_rejectsGarbageSignatureForLiveTeeProvider`) | 156,778 |
+| `notarize` reaching `NotTeeVerifiable` through the live registry (`test_rejectsLiveNonTeeProvider`) | 186,073 |
+| `notarize` propagating the live registry's `ServiceNotExist` (`test_rejectsUnregisteredProvider`) | 50,305 |
 
 A *successful* notarization against the live registry has not been measured, because that needs a
 real TEE proof and none has been notarized on mainnet yet. Budget above the mock figures
@@ -1058,6 +1410,13 @@ accordingly; do not treat the mock numbers as the mainnet cost.
 
 The earlier day-0 figure of 74,940 gas for a full verification came from a throwaway spike harness
 with a different call shape and is **superseded** by the 47,209 above.
+
+**Three tests in this set currently fail, and it is a stale assertion rather than a regression.**
+`test_measuresExecuteGas`, `test_measuresRefusalGas` and `test_measuresRoutingProofExecuteGas` each
+close with `assertLt(used, 200_000)`. The measured values above are 267,579 / 212,583 / 273,472, so
+all three assertions fail while printing the correct number. `forge test` therefore reports **214
+passed, 3 failed of 217**. The ceiling has not been re-baselined against the current settle path;
+the figures in this table are what the run actually measured.
 
 ---
 
@@ -1093,6 +1452,31 @@ not sign the model name. The model id inside the request body records *what was 
 notarization*. Neither is an attestation that a particular set of weights produced the tokens. And
 Writ never claims the model's judgement is correct — only which model was named, what it said, and
 to which question.
+
+### The two halves of the model question, and which one we fixed
+
+Be precise about this, because a recent change fixed one half and left the other exactly where it
+was.
+
+**The question's model is now trustworthy at our layer.** `PolicyGateFactory` and `AgentTreasury`
+derive `allowedModelHash` from the same string they splice into `{"model":"…"}`, so a gate cannot
+ask about one model while accepting an answer attributed to another. That was a real defect and it
+is closed structurally, in `PromptLib` — see [§6.8](#68-promptlib).
+
+**The answer's model is only as trustworthy as 0G's registration, and we cannot fix that here.**
+`PolicyGate` compares the writ's `modelHash` against `keccak256(bytes(svc.model))` — what 0G's
+*registry* says the provider serves. It does **not** compare against the `model` field in the
+request body that was actually sent. If a provider's endpoint honours a `model` field differing
+from its registration, the request can name one model, the endpoint can serve another, and the writ
+still records the **registered** name while the gate still accepts. Nothing in the signed text
+would contradict it, because the signed text contains no model name at all.
+
+This is a 0G-level trust assumption and it belongs beside the acknowledgement key: both are links
+in the chain that sit upstream of anything Writ can verify. Claim 2.10 bounds it — a provider
+cannot silently rename its registered model and stay acknowledged, because changing the model
+string resets `teeSignerAcknowledged` — but "cannot rename its registration" is a weaker statement
+than "must serve what it registered", and only the first is enforced. `CLAIMS.md` states it in the
+NOT-CLAIMED section.
 
 The full ledger of what is and is not claimed, with evidence tiers, is in
 [`../CLAIMS.md`](../CLAIMS.md).

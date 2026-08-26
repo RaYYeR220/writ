@@ -37,9 +37,11 @@ address in this repository is either 0G's own or is written as
 | 1.6 | The routing text binds every one of its five fields | REPRODUCIBLE | `WritLib.t.sol::test_routingProofTextBindsEveryField` |
 | 1.7 | The `sha256` precompile re-binds raw revealed bytes to the attested hashes | REPRODUCIBLE | `WritLib.t.sol::test_sha256PrecompileBindsRawRequestBytes`, `…RawResponseBytes` |
 | 1.8 | A full chat verification costs 47,209 gas; a routing verification 69,337 | REPRODUCIBLE | `WritLib.t.sol::test_measuresVerificationGas`, `…RoutingProofVerificationGas`. Superseding the day-0 spike's 74,940, which came from a different harness shape |
-| 1.9 | `notarize` costs 246,389 gas cold, `notarizeRoutingProof` 343,819, `execute` 399,533 approved / 344,549 refused, `executeRoutingProof` 501,311 | REPRODUCIBLE, with the caveat below | the four `test_measures*` tests. **These read a `MockInferenceServing`, so they are lower bounds** — 0G's real registry returns a much larger struct |
-| 1.10 | Reaching `BadSignature` through 0G's **real** deployed registry costs 133,427 gas; one live `getService` plus assertions costs 79,689 | VERIFIED-LIVE | `forge test --match-path test/WritRegistry.fork.t.sol` against `https://evmrpc.0g.ai` |
+| 1.9 | Cold, with a transcript root: `notarize` 339,161 gas, `notarizeRoutingProof` 438,152, `addTranscript` 81,808. Settling a writ that is already recorded: `execute` 267,579 approved / 212,583 refused, `executeRoutingProof` 273,472 | REPRODUCIBLE, with two caveats below | the `test_measures*` tests, re-run 2026-08-26 after `forge build --force`. **These read a `MockInferenceServing`, so they are lower bounds** — 0G's real registry returns a much larger struct. **Every earlier figure in this row is superseded twice over**, once when notarization left the settle path and once when the transcript root became an append-only list; see 1.9a |
+| 1.9a | Three of those measurement tests currently **fail their own assertion**. `test_measuresExecuteGas`, `test_measuresRefusalGas` and `test_measuresRoutingProofExecuteGas` end in `assertLt(used, 200_000)`, and the measured values are 267,579 / 212,583 / 273,472. `forge test` reports **214 passed, 3 failed of 217** | fact | the ceiling was never re-baselined against the current settle path. The printed numbers are correct; the assertion is stale. Stated here rather than left for a reader to hit |
+| 1.10 | Through 0G's **real** deployed registry, whole-test gas: reaching `BadSignature` 156,778; reaching `NotTeeVerifiable` 186,073; propagating `ServiceNotExist` 50,305; one live `getService` plus assertions 82,189 | VERIFIED-LIVE | `forge test --match-path test/WritRegistry.fork.t.sol` against `https://evmrpc.0g.ai`, 2026-08-26. These are whole-test figures including the tests' own assertions — the fork suite measures behaviour, not gas, and labelling them any other way would overstate them |
 | 1.11 | A *successful* notarization against the live registry has never been measured | — | no live TEE proof has been notarized; see §6 |
+| 1.12 | Deployment gas: `WritRegistry` 1,827,652; `PolicyGateFactory` 3,245,080; `AgentTreasury` 3,223,947; `TreasuryGate` deployed directly 2,581,551. One `PolicyGateFactory.deployGate` call costs 2,540,262 at the median, which is a whole `TreasuryGate` plus its policy written to storage | REPRODUCIBLE | `forge test --gas-report`, optimizer on at 200 runs |
 
 ## 2. 0G mainnet, as it actually stands
 
@@ -73,7 +75,7 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 3.1 | 146 contract tests pass — 142 unit plus 4 against a live mainnet fork | REPRODUCIBLE | `forge test` (142) and `forge test --match-path test/WritRegistry.fork.t.sol` (4) |
+| 3.1 | There are **217 contract tests** — 213 unit plus 4 against a live mainnet fork. `forge test` runs all 217 in one command (it includes the fork suite, so it needs network) and reports **214 passed, 3 failed**. The three failures are the stale gas ceilings in 1.9a; every behavioural test passes | REPRODUCIBLE | `cd writ/contracts && forge build --force && forge test`. Build with `--force` first: a stale artifact can silently skip suites |
 | 3.2 | A prompt-swap is rejected: a genuine, valid TEE signature over a *different* question does not satisfy the gate | REPRODUCIBLE | `AgentTreasury.t.sol::test_refusesPromptSwap`, `PolicyGate.t.sol::test_revertsWhenProofIsForADifferentQuestion`, `PolicyGateFactory.t.sol::test_deployedGateRefusesPromptSwap` |
 | 3.3 | A refusal is a **successful transaction** that records the refusal permanently, not a revert | REPRODUCIBLE | `AgentTreasury.t.sol::test_recordsRefusalOnAttestedDeny`, `…OnAllowAboveCeiling`; `PolicyGate.t.sol::test_recordsDenyVerdictAsARefusal` |
 | 3.4 | The gate names *who* refused — the model, or the policy ceiling overruling a willing model | REPRODUCIBLE | `PolicyGate.t.sol::test_denyIsRefusedByTheModel`, `…test_allowAboveTheCeilingIsRefusedByThePolicy`, `…test_approvedAgreesWithTheRefusalReason` |
@@ -83,24 +85,29 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 | 3.8 | A malformed answer reverts rather than being read as a refusal | REPRODUCIBLE | `VerdictLib.t.sol` (13 cases), `AgentTreasury.t.sol::test_refusesMalformedVerdict` |
 | 3.9 | The gate's question changes with the balance, the nonce, the approval/refusal history and the recipient's payment history — so a proof is bound to the treasury as it stood | REPRODUCIBLE | `AgentTreasury.t.sol::test_questionChangesWhenTheBalanceChanges`, `…WithTheNonce`, `…WithApprovalAndRefusalHistory`, `…WithRecipientHistory` |
 | 3.10 | An attested `ALLOW` to `address(0)` is refused before the proof is even examined | REPRODUCIBLE | `AgentTreasury.t.sol::test_executeRevertsForZeroRecipient`, `…test_executeRoutingProofRevertsForZeroRecipient` |
-| 3.11 | The recovery hatch is timelocked, owner-only, and pushed out of reach by any verified proof including a refusal | REPRODUCIBLE | `TreasuryGate.t.sol`, 12 tests, including `test_refusalPostponesRecovery` and `test_failedVerificationDoesNotPostponeRecovery` |
-| 3.12 | A factory-deployed gate enforces the ceiling, provider and model it was given, and the deployer does not become the owner | REPRODUCIBLE | `PolicyGateFactory.t.sol`, 12 tests |
+| 3.11 | The recovery hatch is timelocked, owner-only, and pushed out of reach by any verified proof including a refusal. A successful sweep **restarts** the clock, so the hatch closes behind itself | REPRODUCIBLE | `TreasuryGate.t.sol`, 14 tests, including `test_refusalPostponesRecovery`, `test_failedVerificationDoesNotPostponeRecovery`, `test_recoverRestartsTheClock` and `test_aFailedRecoverDoesNotRestartTheClock` |
+| 3.12 | A factory-deployed gate enforces the ceiling, provider and model it was given, and the deployer does not become the owner | REPRODUCIBLE | `PolicyGateFactory.t.sol`, 23 tests |
+| 3.13 | **The gate cannot notarize.** `_consume` and `_consumeRoutingProof` take no signature and revert `WritNotNotarized(id)` for a proof that is not already recorded, so an approval whose payout reverts cannot roll the record back with it | REPRODUCIBLE | `AgentTreasury.t.sol::test_aRevertingRecipientLeavesTheNotarizationIntact` — the settlement rolls back, the writ, its transcript candidate and its `notarizedBy` survive, and the decision is not marked consumed. `PolicyGate.t.sol` covers the `WritNotNotarized` path on both formats |
+| 3.14 | **A gate cannot ask about one model and accept an answer from another.** The model name that is spliced into `{"model":"…"}` is the same string `allowedModelHash` is derived from, in one shared implementation | REPRODUCIBLE | `PromptLib.sol`; `PolicyGateFactory.t.sol::test_theModelInTheQuestionIsTheModelTheGateAccepts`, `…test_splicesWhateverModelNameItIsGiven`, `…test_aDeployedGateRefusesAWritForADifferentModel`; `PromptLib.t.sol`, 15 tests |
+| 3.15 | A caller cannot smuggle a second `"model"` key into either prompt half, and cannot end the JSON string literal from inside a model name | REPRODUCIBLE | `PromptLib.t.sol::test_refusesAModelKeyInTheHead`, `…InTheTail`, `…test_refusesAQuoteInTheModelName`, `…ABackslashInTheModelName`, `…AControlByteInTheModelName`. Read NOT-CLAIMED #28 for what the `"model"` scan does **not** promise |
+| 3.16 | Nobody can be denied a transcript slot. A griefer with one address spends 4 candidates and no more; the real archivist always has room, and a reader re-derives its way past the junk | REPRODUCIBLE | `WritRegistry.t.sol::test_aGrieferCannotDenyTheRealArchivistASlot`, `test_aFrontRunnersJunkRootDoesNotShutOutTheRealOne`, `test_theQuotaIsPerWritNotPerAddress`, `test_addTranscriptRejectsADuplicateFromAnySubmitter` |
+| 3.17 | The deploy script refuses to broadcast against a provider that is not acknowledged `TeeML`, or whose model name cannot be spliced into the pinned JSON | REPRODUCIBLE | `Deploy.t.sol`, 11 tests, including `test_refusesAProviderThatIsNotTeeML`, `test_refusesAProviderWhoseSignerIsNotAcknowledged`, `test_refusesAProviderTheRegistryHasNeverSeen`, `test_refusesAModelNameThatCannotBeSpliced` |
 
 ## 4. SDK and MCP server
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 4.1 | 98 SDK tests and 138 MCP tests pass | REPRODUCIBLE | `cd writ/sdk && pnpm test`; `cd writ/mcp && pnpm test` |
+| 4.1 | 118 SDK tests and 145 MCP tests pass, counted 2026-08-26 | REPRODUCIBLE | `cd writ/sdk && pnpm test`; `cd writ/mcp && pnpm test`. One of the 118 (`sdk/test/chain.test.ts`, "reads the live 0G mainnet registry's TEE providers through the SDK ABI") makes a real mainnet read, so the SDK suite needs network |
 | 4.2 | The SDK never hashes a re-serialized object. What is hashed is the exact wire bytes | REPRODUCIBLE | `sdk/src/inference.ts` reads the response with `res.text()` and hashes it as-is; `sdk/test/hashes.test.ts`, `sdk/test/inference.test.ts` |
 | 4.3 | The SDK refuses a streaming request before any network call, because a stream has no single signable body | REPRODUCIBLE | `sdk/src/inference.ts::assertNotStreaming`; eval scenario `trap-streaming-request` |
-| 4.4 | The SDK's hand-written ABIs match the compiled artifacts — every selector and every topic hash | REPRODUCIBLE | `sdk/test/abi.test.ts` compiles the Foundry project and compares |
+| 4.4 | The SDK's and the app's hand-written ABIs match the compiled artifacts — every selector, every event topic hash, **and the field names and order of every returned struct** | REPRODUCIBLE | `sdk/test/abi.test.ts` compiles the Foundry project and compares; `app/test/abi.test.ts` does the same for the browser ABIs. The return-shape half is not optional — see the methodology lesson at the end of this file for the drift it exists to catch |
 | 4.5 | The SDK verifies a proof locally *before* archiving and before any transaction, so a run that cannot be proved costs nothing | REPRODUCIBLE | `sdk/src/attest.ts`; `sdk/test/attest.test.ts` (12 tests) covers the ordering |
 | 4.6 | The SDK claims the proof immediately after inference, before the archive, because the chat id expires | REPRODUCIBLE | `sdk/src/attest.ts` ordering; `sdk/test/attest.test.ts` |
 | 4.7 | The signed text — not a loose field, not configuration — decides which format was used | REPRODUCIBLE | `sdk/src/hashes.ts::parseSignedText`, `sdk/src/notarize.ts::notarizeProof`; `sdk/test/routing.test.ts` |
 | 4.8 | A locally-computed 0G Storage merkle root is compared against the indexer's before anything is notarized | REPRODUCIBLE | `sdk/src/archive.ts::uploadTranscript`; `sdk/test/archive.test.ts` |
 | 4.9 | An archived transcript is self-consistent before it is uploaded, and re-derivable from public data alone afterwards | REPRODUCIBLE | `sdk/src/archive.ts::assertSelfConsistent`; `mcp/src/rehydrate.ts::verifyArchivedTranscript`, which ignores the transcript's own `signingAddress` and anchors on `InferenceServing` |
 | 4.10 | The MCP server mirrors `VerdictLib` byte-for-byte, so it can say what the gate will do before spending gas | REPRODUCIBLE | `mcp/src/verdict.ts`; `mcp/test/verdict.test.ts` |
-| 4.11 | The MCP server detects a proof gone stale against the gate's live state and says *why* — including "a stranger deposited into the treasury" — instead of retrying | REPRODUCIBLE | `mcp/src/question.ts::explainDrift`, `mcp/src/tools/execute.ts::driftAgainst`; `mcp/test/execute.test.ts` (23 tests) |
+| 4.11 | The MCP server detects a proof gone stale against the gate's live state and says *why* — including "a stranger deposited into the treasury" — instead of retrying | REPRODUCIBLE | `mcp/src/question.ts::explainDrift`, `mcp/src/tools/execute.ts::driftAgainst`; `mcp/test/execute.test.ts` (26 tests) |
 | 4.12 | The MCP server keeps the 0G SDKs' `console.log` off `stdout`, which would otherwise corrupt the JSON-RPC stream | REPRODUCIBLE | `mcp/src/stdio-guard.ts`; `mcp/test/stdio-guard.test.ts` |
 | 4.13 | An outcome is read from the emitted event, never inferred from the fact that a transaction mined | REPRODUCIBLE | `mcp/src/tools/execute.ts::decisionFrom`; a missing decision event is reported as an error, not guessed |
 
@@ -109,10 +116,11 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 | # | Claim | Tier | Proof |
 |---|---|---|---|
 | 5.1 | 38 scenarios, written and committed **before** the harness was run against them | REPRODUCIBLE | `eval/scenarios.json` (`"version": 2`, `"registeredOn": "2026-08-26"`); the v1→v2 diff is in git |
-| 5.2 | On a fork of 0G mainnet: 38/38 ran, 0 errored, 0 false approvals, 18/18 traps refused, 4/4 negative controls failed as designed | REPRODUCIBLE | `eval/results/fork.json`, `EVAL.md`. Reproduce with `cd writ/eval && pnpm eval:fork` |
+| 5.2 | On a fork of 0G mainnet: 38/38 ran, 0 errored, 0 false approvals, 0 false refusals, 8 correct approvals, 30 correct refusals, 18/18 traps refused, 4/4 negative controls failed as designed, 0 mechanism mismatches; 25 scenarios answered adversarially and 13 supplied a correct answer | REPRODUCIBLE, and **dated — see 5.6** | `eval/results/fork.json`, `EVAL.md`. Reproduce with `cd writ/eval && pnpm eval:fork`. The artifact self-describes: it records the fork block it ran at, its start and finish timestamps, `inferenceServingIsLiveContract: true`, and `modelBehaviourMeasured: false` |
 | 5.3 | The grader itself was falsified twice — inverted expectations must fail everything, broken setups must record as errored rather than pass | REPRODUCIBLE | `EVAL.md` § "Is the harness itself trustworthy?"; reproduce with `--scenarios <doctored key>` |
-| 5.4 | **The fork run measures our enforcement machinery. It measures nothing about the model's judgement.** | stated, not claimed | see NOT-CLAIMED #9 |
+| 5.4 | **The fork run measures our enforcement machinery. It measures nothing about the model's judgement.** | stated, not claimed | see NOT-CLAIMED #9. `fork.json` records `modelBehaviourMeasured: false` in the artifact itself |
 | 5.5 | No `--live` run has been performed | — | `EVAL.md` § "Scorecard — `--live`" is empty and says why |
+| 5.6 | **A scorecard is only valid for the contract revision it ran against, and this one has already been invalidated once.** The first committed run (block 42693145, 2026-08-26T13:16:49Z) predated the reshape that moved notarization out of the settle path and turned the transcript root into an append-only list. `eval/run.ts` still called the six-argument `execute`, so it stopped reproducing — silently, because a stale artifact keeps reading fine. It has since been brought forward and re-run at block **42716521** (2026-08-26T19:30:06Z), which is the run 5.2 reports | fact, stated because the failure mode is invisible | The artifact records its own fork block and timestamps, so a reader can check the provenance without trusting this row. **The rule that follows: after any change to a contract the harness calls, `eval/results/fork.json` must be regenerated before it is cited.** A scorecard that no longer reproduces looks exactly like one that does |
 
 ## 6. What has never been run
 
@@ -123,17 +131,25 @@ shown.
 |---|---|---|
 | 6.1 | No contract has been deployed to 0G mainnet or to Galileo testnet | fact |
 | 6.2 | No inference has been run against a live 0G Compute provider by this codebase | fact |
-| 6.3 | No transcript has been uploaded to 0G Storage by this codebase. `sdk/src/archive.ts` is exercised against an injected indexer, never against the real one | fact |
+| 6.3 | **No transcript has ever been uploaded to, or downloaded from, 0G Storage by this codebase.** The real uploader and the real downloader are both wired and both reachable without any flag — `mcp/src/runtime.ts` constructs a real `Indexer` against `https://indexer-storage-turbo.0g.ai` for both directions, and `app/src/lib/storage.ts` fetches transcript bytes from that indexer straight from the browser. Neither has ever been pointed at a live deployment, because there is none. Every test injects a stub | fact |
 | 6.4 | No proof produced by a real Intel TDX enclave has been notarized | fact |
 | 6.5 | The deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` is unfunded, which is why | fact |
 | 6.6 | Cost estimates for mainnet operation are derived from measured gas × the live gas price, not from a paid transaction | MODELED |
 
 ## 7. The web app
 
-`writ/app` (a Next.js "docket" that renders a writ's proof chain and lets a reader re-check it in
-their own browser) is being built in a parallel workstream and is not yet committed. **Its claims
-are not in this ledger.** They must be added here, at the same standard, before it is presented as
-part of the submission. Until then, treat any claim it makes as unaudited by this file.
+`writ/app` is committed: a Next.js 16 / React 19 "docket" over four routes — `/` (every decision
+across every gate), `/writ/[id]` (one writ's proof chain, four independently checkable rows plus a
+live tamper demo), `/studio` (compose a policy, deploy a gate), and `/gate/[address]` (one
+treasury: balance, policy, ledger, recovery countdown).
+
+| # | Claim | Tier | Proof |
+|---|---|---|---|
+| 7.1 | 105 app tests pass, counted 2026-08-26 | REPRODUCIBLE | `cd writ/app && pnpm test`. **No app test touches a network** — `fetch` is stubbed and chain reads go through an injected source surface |
+| 7.2 | The app's hand-written ABIs match the compiled artifacts, including the return shape of `getWrit` and the absence of a `transcriptRoot` field | REPRODUCIBLE | `app/test/abi.test.ts` |
+| 7.3 | A reader re-checks a writ **in their own browser**: the transcript bytes are fetched from 0G Storage, content-addressed against the merkle root, re-hashed to `reqHash`/`respHash`, and the signature is recovered against the on-chain `teeSignerAddress` | REPRODUCIBLE for the logic, **never exercised against live 0G Storage** | `app/src/lib/verify.ts`, `app/src/lib/storage.ts`, `app/src/lib/zg-merkle.ts`; `app/test/verify.test.ts` (21), `app/test/storage.test.ts` (9) — all against stubbed `fetch`. See 6.3 |
+| 7.4 | The app carries its own port of 0G Storage's merkle-root algorithm rather than shipping the storage SDK to the browser | REPRODUCIBLE, with the caveat in 7.5 | `app/src/lib/zg-merkle.ts`; `app/test/zg-merkle.test.ts`, 12 vectors |
+| 7.5 | **Those 12 vectors are frozen constants, not a live comparison against the storage SDK.** `app/src/lib/zg-merkle.ts`'s own header says the port is "checked against that package directly, so a change upstream shows up as a failing test." That is not what the test does — it compares against committed hex, and an upstream change would **not** fail it | fact **(found here)** | `app/test/zg-merkle.test.ts` imports only `vitest` and the local module. The comment overstates the check and should be corrected in the source |
 
 ---
 
@@ -143,6 +159,11 @@ Everything below is something Writ deliberately does not assert, or a limitation
 would otherwise have to be discovered by a reader. Several were found by auditing our own code and
 0G's while writing this file; those are marked **(found here)** so you can see the difference
 between a limitation we designed around and one we went looking for.
+
+**Everything in this list is live.** Four defects that used to be here were fixed rather than
+documented, and they have moved to [Found here, and since
+fixed](#found-here-and-since-fixed) — where they read as history, not as caveats. Nothing in the
+numbered list below is a defect we have already closed.
 
 ### 1. We do not claim the model's judgement is correct
 
@@ -269,24 +290,34 @@ model that the recipient is the caller.
 
 ## Found while writing this file
 
-### 11. `transcriptRoot` is unsigned, unverified, first-writer-wins, and permanent **(found here)**
+### 11. A transcript root is unsigned and unverified — and the list of them is unbounded **(found here; the first-writer-wins half is now fixed)**
 
-The TEE signature covers the request and response hashes. **It does not cover `transcriptRoot`.**
-The registry stores whatever `bytes32` the notarizer passes, including zero, without checking that
-it resolves to anything on 0G Storage.
+The TEE signature covers the request and response hashes. **It does not cover a transcript root.**
+The registry has no way to check that a `bytes32` resolves to anything on 0G Storage, and it does
+not try.
 
-Combined with two other properties — notarization is permissionless, and `AlreadyNotarized` makes
-a record immutable — this means **whoever notarizes a given proof first fixes its archive pointer
-forever.** The signature endpoint is public, so a third party who learns a chat id can fetch the
-same proof and notarize it with a junk root before the honest notarizer does. The proof's
-cryptographic content is unaffected — the hashes and the signer are all still verified — but the
-record's pointer to the transcript would be permanently wrong, and the MCP server's
-reconstruct-from-storage path (`writ_execute` on a writ this session did not produce) would fail
-for that writ.
+**What was found, and fixed.** The registry used to store one root, in the `Writ` struct, chosen by
+whoever notarized. Combined with two other properties — notarization is permissionless, and
+`AlreadyNotarized` makes a record immutable — that meant **whoever notarized a given proof first
+fixed its archive pointer forever**, and because the signature endpoint is public and
+unauthenticated, that could be a stranger who learned a chat id and published junk. The proof's
+cryptographic content was unaffected, but the archive pointer was permanently wrong and nothing
+could correct it.
 
-We do not claim `transcriptRoot` is trustworthy. Verify a transcript by downloading it, re-hashing
-it, and comparing to the `reqHash`/`respHash` in the writ — which is exactly what
-`mcp/src/rehydrate.ts` does, and which does not trust the root either.
+`Writ` no longer has a root field and `Notarized` no longer carries one. Roots are an append-only
+list — `addTranscript`, `transcriptRoots`, `transcriptRootCount`, `transcriptRootAt`,
+`transcriptSubmitter`, `transcriptQuotaUsed`, event `TranscriptAdded` — with a per-submitter quota
+of `MAX_ROOTS_PER_SUBMITTER = 4`. A wrong first root is now noise, not damage.
+
+**What is still true, and is a design consequence rather than a defect.** A root is still a claim
+by whoever published it, and this is what remains NOT-CLAIMED:
+
+- **Nothing here vouches for any root.** `transcriptSubmitter` gives attribution, not endorsement.
+  Verify a transcript by downloading it, re-hashing it, and comparing to the `reqHash`/`respHash`
+  in the writ, which is what `mcp/src/rehydrate.ts` does and which trusts no pointer.
+- **The list has no ceiling.** See NOT-CLAIMED #27 for why a ceiling would be worse.
+- **A consumer that finds no verifying candidate must say `unavailable`, not `fail`.** See
+  NOT-CLAIMED #29.
 
 ### 12. The TEE does not attest which model produced the answer **(found here)**
 
@@ -312,11 +343,19 @@ inference and notarization, the writ records the **new** name against an **old**
 image, `strings.Join` returns the hash unchanged, so the text is
 `sha256(req):sha256(img₀)` — 129 bytes, and structurally identical to the chat format.
 
-Our own code comments claim the image format "is rejected rather than mistaken for a chat proof
+Our code comments used to claim the image format "is rejected rather than mistaken for a chat proof
 — it also splits into two fields, but its second field is a comma-joined list rather than one
 hash". **That is true only for two or more images.** The single-image case would be verified as a
 chat proof, and the recorded `respHash` would be the hash of the image bytes rather than of an HTTP
 response body. The SDK test that covers this case uses two images and therefore does not catch it.
+
+**Both wrong comments have since been corrected** — `WritLib`'s NatSpec in
+`contracts/src/WritLib.sol` and `parseSignedText`'s doc comment in `sdk/src/hashes.ts`. Neither now
+claims a discrimination it does not perform; both say the single-image case is indistinguishable
+and that nothing downstream depends on telling them apart. `WritLib.t.sol::test_aSingleImageProofIsByteIdenticalToAChatProof`
+and `…test_aMultiImageProofCannotBeReadAsAChatProof` pin both halves. **The underlying
+indistinguishability is not fixed and cannot be — the bytes are identical.** Only the claim about
+it was wrong, and only the claim was fixable.
 
 Practical impact is small: the resulting writ would still state something true about what the TEE
 signed, and a `PolicyGate` could only consume it if raw image bytes both hashed to the pinned
@@ -359,36 +398,7 @@ If that key acknowledges a signer that is not really inside an enclave, every wr
 it is cryptographically valid and semantically worthless, and Writ has no way to notice. On-chain
 quote verification is not something we are claiming to have solved, or attempted.
 
-### 16. An approval to a recipient that rejects funds erases the whole record **(found here)**
-
-`_settle` transfers with `to.call{value: amount}("")` and reverts `TransferFailed` if it returns
-false. When `execute` also performed the notarization inline — which it does whenever the writ was
-not already on the registry — that revert rolls back **the notarization too**. So:
-
-- A refusal is permanent (it never transfers).
-- An approval to a recipient that reverts on receive, or to an amount the treasury cannot cover,
-  leaves **no record at all** that the model ever approved anything.
-
-The mitigation is the SDK's documented ordering: notarize first, as a separate transaction, and
-settle second. `sdk/src/notarize.ts` says exactly this, and `PolicyGate` skips notarizing when the
-writ already exists, so the ordering costs nothing. But the combined path is still reachable, and
-this asymmetry is not something the design's "a refusal is recorded forever" line implies on its
-own. The eval's `trap-amount-exceeds-balance` hits this path and is scored as `blocked` — correctly
-— but the rolled-back notarization is not called out there.
-
-### 17. `recover` does not reset the recovery clock **(found here)**
-
-`TreasuryGate.recover` sweeps the balance and emits `Recovered`, but it does **not** update
-`lastAttestationAt`. Once the 30-day window has elapsed once, it stays elapsed until the agent
-brings another verified proof. Every subsequent deposit into that gate can be swept by the owner
-immediately, with no timelock at all.
-
-Whether that is wrong depends on your reading. A treasury whose agent has been silent for 30 days
-is arguably a dead treasury, and re-arming the timer would trap later deposits for another month.
-But a depositor who funds a gate expecting the 30-day protection to apply to *their* funds does not
-get it, and nothing tells them so. There is no test for repeated recovery.
-
-### 18. A deployed gate's agent and policy can never be changed **(found here)**
+### 16. A deployed gate's agent and policy can never be changed **(found here)**
 
 `agent` and `owner` are `immutable`; the policy is written at construction and there is no setter.
 This is deliberate — it is what makes "what the gate asks is fixed the moment it exists" true — but
@@ -397,25 +407,33 @@ is the 30-day hatch, and per NOT-CLAIMED #5 a compromised agent that keeps produ
 hold that hatch open indefinitely. Deploy a gate with an agent key you are prepared to be stuck
 with.
 
-### 19. `WritRegistry`'s constructor does not validate its registry address **(found here)**
+### 17. `WritRegistry`'s constructor does not validate its registry address **(found here)**
 
-`constructor(address serving_)` stores the address as `immutable` with no check that it is a
-contract, that it implements `getService`, or that it is 0G's. A registry deployed against the
-wrong address would verify signatures against the wrong authority and would look entirely healthy
-doing it. There is no deploy script in this repository yet, so nothing enforces the correct value.
-Read `registry.serving()` after any deployment and compare it to
-`0x47340d900bdFec2BD393c626E12ea0656F938d84` before trusting a single writ.
+`constructor(address serving_)` rejects `address(0)` with `ZeroServing()` — that one case was worth
+catching, because it is what a missing environment variable produces and it would otherwise deploy
+a registry that fails silently on every proof. **Nothing else is checked.** The address is stored
+`immutable` with no check that it is a contract, that it implements `getService`, or that it is
+0G's. A registry deployed against a wrong non-zero address would verify signatures against the
+wrong authority and would look entirely healthy doing it.
 
-### 20. `PolicyGateFactory` cannot validate that a policy elicits the verdict grammar **(found here)**
+Two things narrow this, neither of them a check inside the constructor. `script/Deploy.s.sol` now
+exists and reads a real service off the configured address before broadcasting, so a wrong address
+aborts the deployment rather than producing a dead registry — but the script is not the only way to
+deploy, and nothing forces its use. So the standing advice holds: read `registry.serving()` after
+any deployment and compare it to `0x47340d900bdFec2BD393c626E12ea0656F938d84` before trusting a
+single writ.
 
-It checks that `promptHead` is non-empty, that `agent` and `owner` are non-zero, and that
-`maxRisk <= 100`. It does not check that the prompt halves form valid JSON, that the prompt
-describes the `ALLOW:`/`DENY:` grammar, that `allowedModelHash` names a model anyone serves, or
-that the assembled body is something a provider will accept. A badly-written policy yields a gate
-that can never be satisfied. That harms only its deployer, but it is unchecked and the factory's
-name does not suggest as much.
+### 18. `PolicyGateFactory` cannot validate that a policy elicits the verdict grammar **(found here)**
 
-### 21. `recipientPriorTotal` saturates and then misreports **(found here)**
+It checks that `spec.promptHead` is non-empty, that `agent` and `owner` are non-zero, that
+`spec.maxRisk <= 100`, and — since the `GateSpec` reshape — that the model name can be safely
+spliced and that neither prompt half carries a `"model"` key. It does **not** check that the prompt
+halves form valid JSON, that the prompt describes the `ALLOW:`/`DENY:` grammar, that
+`spec.modelName` is a model anyone actually serves, or that the assembled body is something a
+provider will accept. A badly-written policy yields a gate that can never be satisfied. That harms
+only its deployer, but it is unchecked and the factory's name does not suggest as much.
+
+### 19. `recipientPriorTotal` saturates and then misreports **(found here)**
 
 `RecipientHistory.total` is a `uint192` that clamps at `type(uint192).max` rather than reverting.
 That is the right trade — this is a fact for a prompt, not a ledger, and a transfer should not be
@@ -423,7 +441,7 @@ lost to an arithmetic edge — but a saturated value is a **wrong** fact present
 true one. It is not reachable with realistic amounts (2¹⁹² wei is around 6×10³⁸ 0G) and there is no
 test for it.
 
-### 22. Three of the nine facts are given to the model without explanation **(found here)**
+### 20. Three of the nine facts are given to the model without explanation **(found here)**
 
 `AgentTreasury`'s system prompt explains `amountPctOfBalance`, `recipientPriorPayments` and
 `recipientPriorTotal`, and states the units. It says nothing about `nonce`, `priorApprovals` or
@@ -431,7 +449,7 @@ test for it.
 left to infer what they mean. We have not measured whether that inference is correct, and on a fork
 we cannot.
 
-### 23. A provider can repoint its endpoint without losing acknowledgement **(found here)**
+### 21. A provider can repoint its endpoint without losing acknowledgement **(found here)**
 
 Per claim 2.10, changing `url` does **not** reset `teeSignerAcknowledged`. So the URL a client is
 directed to is not pinned by the acknowledgement, even though the model name and the TEE signer
@@ -439,16 +457,34 @@ address are. This does not weaken on-chain verification at all — the signature
 to the acknowledged address — but it does mean a client following the registry's `url` is not
 following something the acknowledgement vouched for.
 
-### 24. `PolicyGate` does not re-check the signature for an already-notarized writ
+### 22. Consuming a writ deliberately does not recheck the provider's live standing — **this is the design**
 
-Already documented in `EVAL.md` (limitation 6) and restated here because it belongs in this list.
-When `registry.isNotarized(id)` is true, `PolicyGate` reads the record and never looks at the
-`signature` argument it was handed. That is correct — the record was verified when it was made —
-but it means the signature parameter is inert on that path, and it is why the
-`control-forged-signer-chain` scenario had to be run through a lower-level path that skips
-notarization. Read that control as narrower than it looks.
+Not a caveat. State it as the rule it is: **a permanent record means the check happened once, at
+recording time.**
 
-### 25. `VerdictLib` anchors on the *first* `"content":"` in the response body
+`WritRegistry` checks the TEE signature, the provider's `TeeML` verifiability and 0G's
+acknowledgement of its signer at the moment a proof is recorded. `PolicyGate` then reads that
+record and re-checks none of it — it cannot, because since notarization left the settle path there
+is no signature argument to check anything against. `_consume` takes `(policyId, params,
+rawResponse, provider)` and nothing else.
+
+That is deliberate, and re-deriving it later would be the bug. A writ's meaning would change with
+the registry's later state: a proof recorded while 0G vouched for its provider would stop reading
+as a proof the moment 0G stopped vouching, and the "permanent public record" would be permanent
+only until someone else's opinion moved. A writ says what a named signer signed at a named moment.
+It stays saying that.
+
+So read the gate's model check for exactly what it is: the writ names this policy's provider and
+model, and its answer obeys the verdict grammar. It does **not** assert that 0G still acknowledges
+that provider today. `PolicyGate.t.sol::test_consumingDoesNotRecheckTheProvidersLiveStanding` pins
+the behaviour directly — the provider is downgraded to `verifiability: "standard"` and
+unacknowledged *after* notarization, and the writ still consumes.
+
+The consequence for the evaluation is unchanged and still worth naming: `control-forged-signer-chain`
+exercises a lower-level path, because at the gate there is no signature left to forge. Read that
+control as narrower than its name suggests. Previously documented as `EVAL.md` limitation 6.
+
+### 23. `VerdictLib` anchors on the *first* `"content":"` in the response body
 
 Also from `EVAL.md` (limitation 7). Every response shape we have seen puts the completion first, and
 `trap-response-echoes-prompt` shows that a response echoing the prompt ahead of `choices` is refused
@@ -456,40 +492,220 @@ rather than misparsed. But a provider that echoed a *short* attacker-chosen stri
 the anchor. The response shape belongs to the TEE, not to the agent the gate defends against, so it
 sits outside this threat model. It is still an assumption.
 
-### 26. Non-determinism, and one seed
+### 24. Non-determinism, and one seed
 
 Two runs of the same prompt may differ. Writ provides attribution, not reproducibility, and does not
 claim otherwise. `temperature` is pinned to `0` in the policy, which reduces variance but does not
 eliminate it, and a provider is not obliged to honour it. The eval is one run with no repetition and
 no variance measurement — which, for a live run against a stochastic model, would matter.
 
-### 27. No enumeration, and `writCount` counts both kinds
+### 25. No enumeration, and `writCount` counts both kinds
 
 `WritRegistry` exposes `writCount` but no index of writ ids. An indexer must read the `Notarized`
 event. `writCount` counts chat writs and routing writs together, so it is not a count of distinct
 decisions — one decision proved in both formats increments it twice.
+
+### 26. `PolicyGate` checks the model 0G's **registry** names, not the model the request body asked for **(found here)**
+
+This is the limitation that survived the factory fix, and it is a 0G-level trust assumption we
+cannot close at our layer. It belongs beside #15's acknowledgement key.
+
+`WritRegistry` records `keccak256(bytes(svc.model))` — the model string 0G's `InferenceServing`
+says this provider serves. `PolicyGate` compares the policy's `allowedModelHash` against that. It
+does **not** compare against the `"model"` field inside the request body that was actually posted,
+and it cannot: the TEE signs the request and response hashes and no model name at all, so nothing
+in the proof would contradict a provider that served something else.
+
+**Concretely.** If a provider's endpoint honours a `model` field differing from its registration,
+the request can name one model, the endpoint can answer with another, and the writ still records
+the *registered* name while the gate still accepts.
+
+The factory change (#F3 below) made the **question's** model trustworthy: a gate cannot ask about
+one model and accept an answer attributed to another, because both halves come from one string.
+This entry is the other half, and it is untouched: the **answer's** model is only as trustworthy as
+0G's registration. Claim 2.10 bounds it — a provider cannot silently rename its registration and
+stay acknowledged — but "cannot rename its registration" is a strictly weaker statement than "must
+serve what it registered", and only the first is enforced by anything.
+
+### 27. The transcript list is unbounded, by design **(found here)**
+
+`MAX_ROOTS_PER_SUBMITTER = 4` is a quota per **address**, not a cap on the list. That trades a
+lockout for growth, on purpose.
+
+A global cap plus permissionless writes cannot both be safe: a griefer spends the whole list on
+distinct junk roots and the real archivist is locked out forever, which is the front-running the
+mechanism exists to defeat, only worse and permanent. With a per-address quota a griefer exhausts
+nothing but their own and every honest publisher always has room.
+
+**The cost, stated plainly: one attacker with N addresses can publish 4N candidates.** Nobody is
+denied a slot — that was the actual attack — but `transcriptRoots(id)` can be grown until loading
+it whole is expensive. That is precisely why `transcriptRootCount(id)` and
+`transcriptRootAt(id, i)` exist: a caller that cannot bound its own gas walks the list instead of
+loading it. We do not claim the list is cheap to read in the presence of a determined sybil. We
+claim nobody can be shut out of it, and we prefer that trade, because an unbounded read costs gas
+and a permanent lockout costs the archive.
+
+Bounding the list at all reintroduces the lockout. There is no third option that keeps both.
+
+### 28. The factory's `"model"` scan is a byte scan, not a JSON parser **(found here)**
+
+`PromptLib.requireNoModelKey` searches the author's prompt halves for exactly the seven bytes
+`0x22 6D 6F 64 65 6C 22`. **An escaped spelling passes it.** A JSON key written `"model"` is
+twelve different bytes, contains none of that needle, and every JSON parser resolves it to the key
+`model`. The scan misses it.
+
+**Do not read the scan as a guarantee, because it is not one.** What makes a smuggled key
+survivable is structural, not the check: `allowedModelHash` is derived from `modelName` alone. So a
+smuggled second key can make a provider run a different model, and the writ then comes back
+carrying that other model's hash, and the gate refuses every single one. **The result is a dead
+gate, not a lying one** — it harms its own deployer and nobody else.
+
+The scan is there to catch the accident and the obvious attempt. The guarantee is the shared
+string.
+
+### 29. `unavailable` is not `fail`, and the distinction is load-bearing **(found here)**
+
+A transcript candidate that does not re-derive is **somebody's failed claim, not evidence against
+the writ.**
+
+This has to be said out loud because grading it the other way is an attack. Anyone may publish a
+candidate. If a consumer reported "verification failed" when a candidate did not re-derive, a
+front-runner could make a perfectly sound writ *read as broken* by publishing junk first — the
+exact griefing the append-only list was built to defeat, re-entering through the report instead of
+the storage.
+
+So the rule, everywhere a consumer touches the archive: try candidates in submission order, stop at
+the first that re-derives, and if none does, report **`unavailable` with a reason** — never a pass,
+never a fallback to a weaker check, never a failure attributed to the writ. The writ was verified
+by signature recovery against 0G's registered TEE signer, independently of every pointer. The
+archive is a convenience for reconstructing the bytes; it is not, and must never become, part of
+the trust chain.
+
+---
+
+## Found here, and since fixed
+
+These were real defects in this codebase, found by auditing it. They are recorded because a ledger
+that only lists what is still broken is not an honesty ledger — and because a reader deserves to
+see what a claim of "we went looking" actually produced. **Each of these is fixed in the shipping
+contracts and pinned by a named test.** They are not live limitations.
+
+### F1. An approval to a recipient that rejected funds used to erase the whole record
+
+`_settle` transfers with `to.call{value: amount}("")` and reverts `TransferFailed` if it returns
+false. When `execute` also performed the notarization inline — which it did whenever the writ was
+not already recorded — that revert rolled back **the notarization with it**. The asymmetry:
+
+- A refusal was permanent (it never transfers).
+- An approval to a recipient that reverts on receive, or to an amount the treasury could not cover,
+  left **no record at all** that the model ever approved anything.
+
+That falsifies the project's central claim. "Every decision is recorded forever" cannot survive a
+path where failed approvals are the one kind of decision that vanishes, and the mitigation at the
+time was a documented SDK ordering — a convention, not a guarantee.
+
+**Fixed structurally.** `PolicyGate._consume` and `_consumeRoutingProof` no longer notarize and no
+longer take a signature; they require the writ to already exist and revert `WritNotNotarized(id)`
+otherwise. `TreasuryGate.execute` and `executeRoutingProof` lost their trailing
+`bytes signature, bytes32 transcriptRoot` arguments as a consequence. Notarizing is now its own
+transaction, so nothing the guarded action does can reach the record.
+Pinned by `AgentTreasury.t.sol::test_aRevertingRecipientLeavesTheNotarizationIntact`: the
+settlement rolls back, the writ and its transcript candidate survive, and the decision is not
+marked consumed. See also claim 3.13.
+
+### F2. `recover` used to leave the recovery clock elapsed
+
+`TreasuryGate.recover` swept the balance and emitted `Recovered` without updating
+`lastAttestationAt`. Once the 30-day window had elapsed once, it stayed elapsed until the agent
+brought another verified proof — so every later deposit into that gate could be swept immediately,
+with no timelock at all, and nothing told a depositor so.
+
+**Fixed.** `recover` now sets `lastAttestationAt = block.timestamp` before transferring, so the
+hatch closes behind itself and the agent gets a fresh full delay to bring the gate back to life. A
+sweep is the owner acting on the gate, so it counts as activity exactly as a decision does.
+Pinned by `TreasuryGate.t.sol::test_recoverRestartsTheClock`, with
+`test_aFailedRecoverDoesNotRestartTheClock` covering the case where the sweep itself reverts.
+
+### F3. A gate could ask about one model and accept an answer from another
+
+The worst of the three, because every check passed while it happened. `AgentTreasury` spelled its
+model inside `promptHead` and took `allowedModelHash` as a separate constructor argument;
+`PolicyGateFactory.deployGate` took a whole `PolicyGate.Policy` with the same two fields
+independent. A caller could name one model in the pinned JSON and set an unrelated
+`allowedModelHash`, producing a gate whose question and whose acceptance rule disagreed —
+**and nothing on chain could reconcile them afterwards**, because `PolicyGate` compares the hash
+against 0G's registry and never reads the prompt.
+
+**Fixed by making the mismatch unrepresentable rather than validating against it.** Everything that
+builds a gate now takes a model **name**: `deployGate(GateSpec spec, address agent, address owner)`
+with `GateSpec { string modelName; bytes promptHead; bytes promptTail; address allowedProvider;
+uint8 maxRisk; }`, and `AgentTreasury`'s constructor taking `string modelName` in position 4. The
+splice and its four errors live in one place, `contracts/src/PromptLib.sol`, which both come
+through — because two copies of this rule is how the defect happened. `allowedModelHash` is derived
+from that same string. `AgentTreasury`'s `PROMPT_MODEL` constant and the exported
+`AGENT_TREASURY_PROMPT_MODEL` were removed, and the deploy script's
+`ModelIsNotTheOneThePromptNames` guard was removed because it became structurally unable to fire.
+Pinned by `PolicyGateFactory.t.sol::test_theModelInTheQuestionIsTheModelTheGateAccepts` and
+`test_aDeployedGateRefusesAWritForADifferentModel`; see claim 3.14.
+
+**This closed one half of the model problem, not both.** NOT-CLAIMED #26 is the half that remains.
+
+### F4. Whoever notarized first used to fix the archive pointer forever
+
+Covered in full at NOT-CLAIMED #11, which is where a reader looking for the surviving limitation
+will go. In short: the root lived in the `Writ` struct, notarization is permissionless, and records
+are immutable, so a stranger who learned a chat id could notarize with a junk root and the real
+archivist had nowhere to put the true one. Roots are now an append-only candidate list with a
+per-submitter quota. What remains is #11, #27 and #29 — a root is still nobody's fact.
+
+### A methodology lesson worth recording: **ABI drift tests must compare return shapes, not selectors**
+
+Not a contract defect — a defect in how we were checking for contract defects, and it nearly cost
+us silently.
+
+A function selector is computed over the **input** types only. So when `transcriptRoot` left the
+`Writ` struct, `getWrit(bytes32)` **kept the identical selector**. A drift test that compares
+selectors — which is the obvious thing to write, and what we had — passes cleanly across a change
+that reshapes what the function returns. Three positional decodes in the app would have rendered
+wrong values, in the wrong fields, with **no throw and no failing test**: a shorter tuple simply
+decodes into fewer variables and the trailing ones read as undefined.
+
+The rule that follows: an ABI fidelity test has to assert the **return tuple's field names and
+order**, and event **argument lists**, not only selectors and topic hashes. Topic hashes are the
+same trap in the other direction — an event's topic covers its full signature, so it does catch a
+removed field, but a selector never will. Claim 4.4 is written against this standard now.
 
 ---
 
 ## Reproducing everything in this file
 
 ```bash
-# contracts: 142 unit tests
-cd writ/contracts && forge test
+# contracts: 217 tests (213 unit + 4 against live mainnet). Build with --force first —
+# a stale artifact silently skips suites. Expect 214 passed, 3 failed; the three are the
+# stale gas ceilings in claim 1.9a, and the numbers they print are the ones in this file.
+cd writ/contracts && forge build --force && forge test
 
-# contracts: 4 tests against live 0G mainnet, read-only, spends nothing
+# contracts: the 4 tests against live 0G mainnet on their own, read-only, spends nothing
 forge test --match-path test/WritRegistry.fork.t.sol -vv
 
-# gas measurements
+# gas measurements, and the full report every figure in §1 comes from
 forge test --match-test measures -vv
+forge test --gas-report
 
-# sdk: 98 tests
+# a dry run of the deployment. Reads 0G mainnet, broadcasts nothing, costs nothing.
+forge script script/Deploy.s.sol --fork-url https://evmrpc.0g.ai
+
+# sdk: 118 tests (one makes a real mainnet read)
 cd ../sdk && pnpm install && pnpm test
 
-# mcp: 138 tests
+# mcp: 145 tests, no chain at all
 cd ../mcp && pnpm install && pnpm test
 
-# the graded evaluation, on a fork of 0G mainnet
+# app: 105 tests, no network at all
+cd ../app && pnpm install && pnpm test
+
+# the graded evaluation, on a fork of 0G mainnet. Regenerate this after ANY change to a
+# contract the harness calls — see claim 5.6 for the time it silently stopped reproducing.
 cd ../eval && pnpm install && pnpm eval:fork
 
 # regenerate the signing fixtures the Solidity tests assert against
