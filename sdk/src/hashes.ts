@@ -96,10 +96,18 @@ export function signedTextRouting(reqHash: string, respHash: string, routing: Ro
 /**
  * Works out which format a provider signed.
  *
- * The broker produces three texts. Two are supported; the image format
- * (`sha256hex(req):sha256hex(img0),sha256hex(img1),…`) is not, and is rejected rather than
- * mistaken for a chat proof — it also splits into two fields, but its second field is a
- * comma-joined list rather than one hash.
+ * Two formats are supported: the decentralized chat text and the centralized routing proof.
+ *
+ * The image format (`sha256hex(req):sha256hex(img0),sha256hex(img1),…`) is not. A multi-image
+ * proof is rejected here, because its second field is a comma-joined list rather than one hash.
+ * A SINGLE-image proof is not: `strings.Join` over one element returns that element unchanged,
+ * so it is byte-identical to a chat proof and cannot be told apart from one. Nothing downstream
+ * depends on the distinction — the signature still binds the request to what the TEE returned —
+ * but the two are genuinely indistinguishable and this parser does not pretend otherwise.
+ *
+ * A fourth family exists that we do not produce or consume: the E2EE texts assembled in
+ * 0gfoundation/0g-pc-e2ee (protocol/proof/proof.go), tagged `zg-sig-v1/…`. They carry three
+ * fields, so they fail closed here.
  */
 export function parseSignedText(text: string): ParsedSignedText {
   const parts = text.split(':')
