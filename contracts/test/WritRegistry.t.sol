@@ -42,6 +42,14 @@ contract WritRegistryTest is Test {
         serving.set(PROVIDER, MODEL, "TeeML", TEE, true);
     }
 
+    /// Everything this contract decides comes from `serving`. A zero address there would deploy
+    /// a registry that reverts on every call, and silently — the deploy script is exactly where
+    /// a fat-fingered constant would land.
+    function test_constructorRejectsTheZeroServingAddress() public {
+        vm.expectRevert(WritRegistry.ZeroServing.selector);
+        new WritRegistry(address(0));
+    }
+
     function test_notarizesValidProof() public {
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
         assertEq(id, registry.writId(PROVIDER, REQ_H, RESP_H));

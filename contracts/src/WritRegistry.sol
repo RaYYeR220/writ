@@ -77,6 +77,7 @@ contract WritRegistry {
     error RoutingFieldEmpty();
     error RoutingFieldTooLong(uint256 length);
     error RoutingFieldHasDelimiter();
+    error ZeroServing();
     error TranscriptRootEmpty();
     error TranscriptAlreadyListed(bytes32 root);
     error TooManyTranscriptRoots(uint256 cap);
@@ -106,7 +107,14 @@ contract WritRegistry {
     ///      is all the attribution there is: nothing here vouches for the root itself.
     event TranscriptAdded(bytes32 indexed id, bytes32 indexed root, address indexed submitter);
 
+    /// @param serving_ 0G's InferenceServing contract. Mainnet:
+    ///        `0x47340d900bdFec2BD393c626E12ea0656F938d84` (chain 16661).
+    /// @dev The address is immutable and every check this registry makes is read from it, so a
+    ///      wrong one cannot be corrected — it deploys a registry that fails on every proof. The
+    ///      zero address is the mistake worth catching here, because it is the one a missing
+    ///      environment variable produces and it would fail silently at deployment.
     constructor(address serving_) {
+        if (serving_ == address(0)) revert ZeroServing();
         serving = IInferenceServing(serving_);
     }
 
