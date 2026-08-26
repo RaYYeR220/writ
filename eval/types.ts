@@ -74,6 +74,32 @@ export type Probe =
   | 'forged-signature'
   /** A whole provider endpoint signing with the wrong key, so the SDK meets it as a client would. */
   | 'forged-provider'
+  /**
+   * The whole pipeline against a *centralized* provider's five-field routing proof.
+   *
+   * Most live 0G mainnet providers are centralized, so this is the format the majority of the
+   * network actually signs: `sha256(req):sha256(resp):providerType:providerIdentity:tlsFingerprint`.
+   * It notarizes through `notarizeRoutingProof` and settles through `executeRoutingProof`, and it
+   * binds strictly more than the chat path — the proof names the upstream that answered.
+   */
+  | 'routing'
+  /**
+   * A genuine routing proof settled down the chat path instead of the routing one.
+   *
+   * The two writ ids are domain-separated, so the chat id the gate computes names a record that
+   * does not exist. Tests that the separation is real rather than decorative.
+   */
+  | 'routing-as-chat'
+  /**
+   * A genuine routing proof offered to the registry under doctored attribution.
+   *
+   * The `:`-joined signed text is ambiguous under field splitting — `("x", "y:z")` and
+   * `("x:y", "z")` produce identical bytes — so one valid signature could otherwise be recorded
+   * against the wrong upstream. `WritRegistry._requireLabel` is the guard; this probe calls the
+   * registry directly, because the SDK refuses to build such a proof at all and the guard under
+   * test lives in the contract.
+   */
+  | 'routing-attribution'
 
 /** Where the model's answer came from when running against the stand-in signer. */
 export type AnswerSource =
@@ -91,7 +117,15 @@ export type AmountSpec =
   | { balanceMultiple: number }
 
 export type RecipientSpec =
-  | { kind: 'random' }
+  /**
+   * A fresh, previously-unseen address derived from the run's recipient seed.
+   *
+   * Was `random` until the keys started mattering: a random recipient's key is discarded, so
+   * every approved transfer under `--live` left the treasury permanently. Derived addresses are
+   * indistinguishable to both the gate and the model, and recoverable afterwards. `role`
+   * separates the two addresses a mismatch scenario needs.
+   */
+  | { kind: 'derived'; role?: 'recipient' | 'execute-recipient' }
   | { kind: 'fixed'; address: string }
   /** The agent's own address — the caller paying itself. */
   | { kind: 'agent' }
@@ -144,6 +178,11 @@ export type Scenario = {
   factOverrides?: Partial<Record<QuestionFact, string>>
   /** How much to pay into the treasury between proof and settlement, for `state-drift`. */
   drift?: AmountSpec
+  /**
+   * Attribution to substitute before offering a routing proof to the registry, for
+   * `routing-attribution`. Exactly one field, so the probe tests exactly one guard.
+   */
+  routingOverride?: { field: 'providerType' | 'providerIdentity'; value: string }
 }
 
 /**
@@ -243,6 +282,14 @@ export type Scorecard = {
   trapsTotal: number
   controlsFailedAsDesigned: number
   controlsTotal: number
+  /**
+   * Controls that could not run in this mode.
+   *
+   * Tracked separately from `skipped` because the "did a negative control fail?" warning has to
+   * discount exactly these. Netting the total skipped count against the control total instead
+   * would let unrelated skips paper over a control that genuinely did not fail.
+   */
+  controlsSkipped: number
   errored: number
   skipped: number
   mechanismMismatches: number

@@ -7,6 +7,8 @@
   "scripts": {
     "eval:fork": "tsx run.ts --fork",
     "eval:live": "tsx run.ts --live",
+    "eval:sweep": "tsx sweep.ts",
+    "eval:sweep:selftest": "tsx sweep.ts --selftest",
     "list": "tsx run.ts --list",
     "typecheck": "tsc -p tsconfig.json"
   },

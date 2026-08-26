@@ -14,7 +14,7 @@
  * mode that it does not take in the other.
  */
 import { ethers } from 'ethers'
-import type { ArchiveOptions, InferenceBrokerLike, Transcript } from '../sdk/src/index.js'
+import type { ArchiveOptions, InferenceBrokerLike, RoutingFields, Transcript } from '../sdk/src/index.js'
 import {
   sha256Hex,
   INFERENCE_SERVING_ABI,
@@ -22,6 +22,7 @@ import {
   TREASURY_GATE_ABI,
   WRIT_REGISTRY_ABI,
 } from '../sdk/src/index.js'
+import { FORK_RECIPIENT_SEED, requireLiveSeed } from './recipients.js'
 import { ensureBuilt, buildFailure, loadArtifact } from '../sdk/test/helpers/contracts.js'
 import { startAnvil, ANVIL_KEY } from '../sdk/test/helpers/anvil.js'
 import { startProviderStub } from '../sdk/test/helpers/provider-stub.js'
@@ -35,6 +36,21 @@ export const MAX_RISK = 50
 
 /** A live 0G mainnet TeeML chatbot, used on the fork purely to read real registry facts. */
 export const REFERENCE_TEE_PROVIDER = '0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9'
+
+/**
+ * The upstream attribution the fork's centralized stand-in signs into its routing proofs.
+ *
+ * Shaped like what a real centralized 0G provider's broker produces — `providerType` is
+ * `"centralized"` there too — but the identity is unmistakably ours so no reader can take the
+ * report for an attestation about a real upstream. The fingerprint is a fixed 32 bytes; on a real
+ * provider it is the TLS certificate fingerprint of the upstream that actually served the request,
+ * which is the part of this proof the chat format does not attest at all.
+ */
+export const FORK_ROUTING: RoutingFields = {
+  providerType: 'centralized',
+  providerIdentity: 'writ-eval-upstream',
+  tlsFingerprint: '0x' + '5c'.repeat(32),
+}
 
 /** One inference channel for one scenario. */
 export type Session = {
@@ -75,6 +91,25 @@ export type EvalEnv = {
   archiveTranscript: (t: Transcript, signer: ethers.Signer, opts?: ArchiveOptions) => Promise<string>
   /** Opens a channel that will answer with `answer` on the fork, or with the model's own words live. */
   session: (answer: string) => Promise<Session>
+  /**
+   * A channel whose TEE signs the five-field routing text a *centralized* provider produces.
+   *
+   * Present only on the fork, where the stand-in can be told which format to sign. Under `--live`
+   * the format belongs to the configured provider and nobody else: if it is decentralized it
+   * signs the two-field chat text and no amount of configuration changes that. The routing
+   * scenarios therefore fall back to `session` under `--live` and report themselves as skipped
+   * when the proof that comes back is not a routing proof — never as a pass.
+   */
+  routingSession?: (answer: string) => Promise<Session>
+  /**
+   * The seed every derived recipient address comes from. Recorded in the report.
+   *
+   * Committed for `--fork`; taken from `WRIT_RECIPIENT_SEED` for `--live`, because on mainnet
+   * these keys hold real funds until `sweep.ts` brings them home.
+   */
+  recipientSeed: string
+  /** True when the seed is the committed one, so the report can say the keys are public. */
+  recipientSeedIsPublic: boolean
   /**
    * A provider endpoint that signs with a key 0G's registry does not recognise.
    *
@@ -266,6 +301,10 @@ export async function forkEnv(): Promise<EvalEnv> {
     caveats,
   )
 
+  facts.push(
+    `Recipient addresses were derived from the committed fork seed "${FORK_RECIPIENT_SEED}" rather than generated randomly, so this run is reproducible address for address. A live run must supply its own WRIT_RECIPIENT_SEED.`,
+  )
+
   const registryAddress = await deploy('WritRegistry', [serving], wallet)
   const treasuryAddress = await deploy(
     'AgentTreasury',
@@ -300,6 +339,19 @@ export async function forkEnv(): Promise<EvalEnv> {
         close: () => stub.stop(),
       }
     },
+    routingSession: async (answer: string) => {
+      // Same key, same registry entry, same everything except which text the TEE signs. That is
+      // the only difference between the two provider kinds as far as Writ is concerned.
+      const stub = await startProviderStub({ teeKey: TEE_KEY, content: answer, routing: FORK_ROUTING })
+      return {
+        endpoint: stub.endpoint,
+        teeSigner,
+        signPair: stub.signPair,
+        close: () => stub.stop(),
+      }
+    },
+    recipientSeed: FORK_RECIPIENT_SEED,
+    recipientSeedIsPublic: true,
     forgedSession: async (answer: string) => {
       const stub = await startProviderStub({ teeKey: '0x' + '22'.repeat(32), content: answer })
       return { endpoint: stub.endpoint, teeSigner: stub.teeSigner, close: () => stub.stop() }
@@ -333,6 +385,11 @@ export async function liveEnv(): Promise<EvalEnv> {
       '--live moves real funds on 0G mainnet and spends real 0G on inference and storage. Set WRIT_LIVE_CONFIRM=1 to say that is intended.',
     )
   }
+
+  // Demanded before anything else happens. Without it the run would move real funds to addresses
+  // whose keys nobody would ever hold again, which is precisely the failure mode derivation exists
+  // to remove.
+  const recipientSeed = requireLiveSeed()
 
   const facts: string[] = []
   const caveats: string[] = []
@@ -377,6 +434,10 @@ export async function liveEnv(): Promise<EvalEnv> {
     `0G mainnet chain ${net.chainId} at block ${blockNumber}; WritRegistry ${registryAddress}, AgentTreasury ${treasuryAddress}.`,
     `Provider ${teeProvider} serves "${svc.model}" with verifiability "${svc.verifiability}"; its TEE signer ${svc.teeSignerAddress} is acknowledged in 0G's official InferenceServing at ${INFERENCE_SERVING_MAINNET}.`,
     `Every answer below was produced by that provider's model inside its enclave and signed by that key. Transcripts were archived to 0G Storage via ${indexer}.`,
+    'Recipient addresses were derived from WRIT_RECIPIENT_SEED, not generated randomly, so every approved transfer is recoverable with `pnpm eval:sweep`. The model cannot tell a derived address from a random one; nothing measured here changes.',
+  )
+  caveats.push(
+    'Approved transfers really moved on mainnet. They sit at derived addresses until swept, and a sweep that is never run is a burn after all.',
   )
 
   return {
@@ -403,6 +464,10 @@ export async function liveEnv(): Promise<EvalEnv> {
       teeSigner: svc.teeSignerAddress,
       close: async () => {},
     }),
+    // No `routingSession`: which signed-text format this provider produces is the provider's to
+    // decide. The routing scenarios read the format off the proof and skip if it is not routing.
+    recipientSeed,
+    recipientSeedIsPublic: false,
     primeTreasury: async () => await rpc.getBalance(treasuryAddress),
     depositToTreasury: async (amount: bigint) => {
       await (await wallet.sendTransaction({ to: treasuryAddress, value: amount })).wait()
