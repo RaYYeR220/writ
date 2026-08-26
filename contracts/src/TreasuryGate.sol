@@ -285,6 +285,9 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     ///
     ///      The recipient is the owner's to choose, so the only check here is that it is not the
     ///      zero address — sweeping there would burn the treasury this function exists to rescue.
+    ///
+    ///      A successful sweep restarts the delay, so the hatch closes behind itself rather than
+    ///      standing open over whatever the gate receives next.
     function recover(address to) external nonReentrant {
         if (msg.sender != owner) revert NotOwner(msg.sender);
         if (to == address(0)) revert ZeroRecipient();
@@ -296,6 +299,12 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
 
         uint256 amount = address(this).balance;
         emit Recovered(to, amount, lastAttestationAt);
+
+        // Restart the clock. Without this the window, once elapsed, stays elapsed: every later
+        // deposit would be sweepable the instant it landed and the timelock would be gone. A
+        // sweep is the owner acting on the gate, so it counts as activity exactly as a decision
+        // does — and the agent gets a fresh full delay to bring the gate back to life.
+        lastAttestationAt = uint64(block.timestamp);
 
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert TransferFailed(to, amount);

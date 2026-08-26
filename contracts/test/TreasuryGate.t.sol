@@ -244,6 +244,47 @@ contract TreasuryGateRecoveryTest is Test {
         assertEq(address(gate).balance, 10 ether);
     }
 
+    /// A sweep must restart the clock, or the hatch stays open. Once the window has elapsed it
+    /// stays elapsed, so every later deposit would be sweepable the instant it landed, with no
+    /// timelock at all — which is the opposite of what `RECOVERY_DELAY` is for.
+    function test_recoverRestartsTheClock() public {
+        vm.warp(block.timestamp + 31 days);
+        vm.prank(owner);
+        gate.recover(rescue);
+        assertEq(gate.lastAttestationAt(), uint64(block.timestamp));
+
+        // A fresh deposit is not immediately sweepable.
+        vm.deal(address(gate), 5 ether);
+        uint64 availableAt = gate.recoveryAvailableAt();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.RecoveryNotYetAvailable.selector, availableAt));
+        gate.recover(rescue);
+        assertEq(address(gate).balance, 5 ether);
+
+        // It becomes sweepable once a second full delay has passed, and not before.
+        vm.warp(uint256(availableAt) + 1);
+        vm.prank(owner);
+        gate.recover(rescue);
+        assertEq(rescue.balance, 15 ether);
+        assertEq(gate.lastAttestationAt(), uint64(block.timestamp));
+    }
+
+    /// A recovery that reverts must not move the clock either.
+    function test_aFailedRecoverDoesNotRestartTheClock() public {
+        RejectsEther sink = new RejectsEther();
+        uint64 last = gate.lastAttestationAt();
+        vm.warp(block.timestamp + 31 days);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.TransferFailed.selector, address(sink), 10 ether));
+        gate.recover(address(sink));
+        assertEq(gate.lastAttestationAt(), last);
+
+        vm.prank(owner);
+        gate.recover(rescue);
+        assertEq(rescue.balance, 10 ether);
+    }
+
     function test_recoverRevertsWhenTheDestinationRejectsFunds() public {
         RejectsEther sink = new RejectsEther();
         vm.warp(block.timestamp + 31 days);
