@@ -1,0 +1,23 @@
+{
+  "name": "@writ/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Graded evaluation harness for Writ: pre-registered scenarios run end to end through the real SDK and the real contracts, scored against a committed answer key.",
+  "scripts": {
+    "eval:fork": "tsx run.ts --fork",
+    "eval:live": "tsx run.ts --live",
+    "list": "tsx run.ts --list",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-compute-ts-sdk": "0.9.0",
+    "@0gfoundation/0g-storage-ts-sdk": "1.2.11",
+    "ethers": "6.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
