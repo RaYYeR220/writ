@@ -25,6 +25,13 @@ abstract contract PolicyGate {
     WritRegistry public immutable registry;
 
     mapping(uint256 => Policy) internal _policies;
+
+    /// @notice Decisions this gate has already spent, keyed by `decisionKey`.
+    /// @dev NOT keyed by the writ id the registry recorded. A provider, a question and an answer
+    ///      make one decision, and the same decision can arrive proved in either signed-text
+    ///      format. Those are two distinct writs in the registry — they attest different things
+    ///      about which upstream served the request, and both deserve to be recorded — but
+    ///      spending one must spend the other, or one verdict would authorise two actions.
     mapping(bytes32 => bool) public consumed;
 
     error ModelNotAllowed(bytes32 got, bytes32 want);
@@ -58,7 +65,7 @@ abstract contract PolicyGate {
     ///      refusal returns `approved == false` instead, so the notarization survives and the
     ///      record is permanent. Fail-closed means the guarded action does not happen, not that
     ///      the transaction disappears.
-    /// @return id The writ identifier, now marked consumed whichever way the decision went.
+    /// @return id The writ the registry recorded — the chat writ on this path.
     /// @return approved True only for an ALLOW within the policy's risk ceiling.
     /// @return risk The risk score the model reported.
     function _consume(
@@ -71,7 +78,8 @@ abstract contract PolicyGate {
     ) internal returns (bytes32 id, bool approved, uint8 risk) {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
-        id = registry.writId(provider, reqHash, respHash);
+        // On this path the record and the decision are the same key.
+        id = decisionKey(provider, reqHash, respHash);
         if (consumed[id]) revert WritAlreadyConsumed(id);
 
         // Notarizing is a public good; someone else may already have done it.
@@ -79,11 +87,15 @@ abstract contract PolicyGate {
             registry.notarize(provider, reqHash, respHash, signature, transcriptRoot);
         }
 
-        (approved, risk) = _decide(policyId, id, rawResponse);
+        (approved, risk) = _decide(policyId, id, id, rawResponse);
     }
 
     /// @notice `_consume` for a centralized provider, whose TEE signs the five-field routing text.
-    /// @dev Identical guarantees; only the signed format and the writ identifier differ.
+    /// @dev Identical guarantees; only the signed format and the recorded writ differ. The
+    ///      decision is still spent under `decisionKey`, so a routing proof and a chat proof of
+    ///      the same answer cannot both authorise an action.
+    /// @return id The writ the registry recorded — the routing writ, which is NOT the key the
+    ///         decision is spent under. Read `consumed` at `decisionKey` for that.
     function _consumeRoutingProof(
         uint256 policyId,
         bytes memory params,
@@ -95,14 +107,23 @@ abstract contract PolicyGate {
     ) internal returns (bytes32 id, bool approved, uint8 risk) {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
-        id = _routingId(provider, reqHash, respHash, routing);
-        if (consumed[id]) revert WritAlreadyConsumed(id);
+        bytes32 decision = decisionKey(provider, reqHash, respHash);
+        if (consumed[decision]) revert WritAlreadyConsumed(decision);
 
+        id = _routingId(provider, reqHash, respHash, routing);
         if (!registry.isNotarized(id)) {
             _notarizeRouting(provider, reqHash, respHash, routing, signature, transcriptRoot);
         }
 
-        (approved, risk) = _decide(policyId, id, rawResponse);
+        (approved, risk) = _decide(policyId, id, decision, rawResponse);
+    }
+
+    /// @notice The key a decision is spent under, whichever signed-text format proved it.
+    /// @dev A provider, a question and an answer are one decision. This deliberately coincides
+    ///      with the chat writ id: that identifier already names exactly those three things, so
+    ///      reusing it avoids inventing a second hash of the same tuple.
+    function decisionKey(address provider, bytes32 reqHash, bytes32 respHash) public view returns (bytes32) {
+        return registry.writId(provider, reqHash, respHash);
     }
 
     function _routingId(address provider, bytes32 reqHash, bytes32 respHash, WritRegistry.RoutingProof calldata routing)
@@ -153,7 +174,9 @@ abstract contract PolicyGate {
     }
 
     /// @dev Reads the notarized record back, enforces the policy's model, and renders the verdict.
-    function _decide(uint256 policyId, bytes32 id, bytes memory rawResponse)
+    /// @param id The writ to read the model from — the record that was just notarized.
+    /// @param decision The key to spend, which is the same as `id` only on the chat path.
+    function _decide(uint256 policyId, bytes32 id, bytes32 decision, bytes memory rawResponse)
         private
         returns (bool approved, uint8 risk)
     {
@@ -165,8 +188,8 @@ abstract contract PolicyGate {
         // A malformed answer is not a refusal — it is an unverifiable answer, so it reverts.
         (bool allowed, uint8 reported) = VerdictLib.parseVerdict(rawResponse);
 
-        // The decision is rendered either way, so the writ is spent either way.
-        consumed[id] = true;
+        // The decision is rendered either way, so it is spent either way.
+        consumed[decision] = true;
         risk = reported;
         approved = allowed && reported <= p.maxRisk;
     }

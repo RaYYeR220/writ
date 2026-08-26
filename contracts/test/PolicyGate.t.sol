@@ -85,10 +85,11 @@ contract PolicyGateTest is Test {
             gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
         assertTrue(approved);
         assertEq(risk, 12);
-        assertTrue(gate.consumed(id));
         assertTrue(registry.isNotarized(id));
         assertTrue(registry.isRoutingProof(id));
         assertEq(registry.getRoutingProof(id).providerIdentity, P_IDENTITY);
+        // The decision is spent under the format-independent key, not the routing record's id.
+        assertTrue(gate.consumed(registry.writId(PROVIDER, sha256(req), sha256(resp))));
     }
 
     function test_recordsRefusalFromARoutingProof() public {
@@ -101,7 +102,7 @@ contract PolicyGateTest is Test {
         assertFalse(approved);
         assertEq(risk, 91);
         assertTrue(registry.isNotarized(id));
-        assertTrue(gate.consumed(id));
+        assertTrue(gate.consumed(registry.writId(PROVIDER, sha256(req), sha256(resp))));
     }
 
     /// The routing writ is a different record, so it must not answer for a plain one.
@@ -157,9 +158,57 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
         bytes memory sig = _signRouting(req, resp);
-        (bytes32 id,,) = gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
-        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
+        bytes32 decision = registry.writId(PROVIDER, sha256(req), sha256(resp));
         gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, decision));
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
+    }
+
+    /// One question, one answer, one provider is ONE decision, whichever format proved it.
+    /// The registry still records the two proofs separately - they are different facts about
+    /// which upstream served the request - but the gate spends the decision only once.
+    function test_aRoutingProofSpendsTheChatDecisionToo() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 decision = registry.writId(PROVIDER, sha256(req), sha256(resp));
+
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertTrue(gate.consumed(decision));
+
+        bytes memory chatSig = _sign(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, decision));
+        gate.consume(PID, params, resp, PROVIDER, chatSig, bytes32(0));
+    }
+
+    function test_aChatProofSpendsTheRoutingDecisionToo() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 decision = registry.writId(PROVIDER, sha256(req), sha256(resp));
+
+        gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertTrue(gate.consumed(decision));
+
+        bytes memory routingSig = _signRouting(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, decision));
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), routingSig, bytes32(0));
+    }
+
+    /// A refusal is a spent decision too, so it closes the other format just the same.
+    function test_aRefusalSpendsTheDecisionAcrossFormats() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("DENY:91");
+        bytes32 decision = registry.writId(PROVIDER, sha256(req), sha256(resp));
+
+        (, bool approved,) =
+            gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertFalse(approved);
+
+        bytes memory chatSig = _sign(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, decision));
+        gate.consume(PID, params, resp, PROVIDER, chatSig, bytes32(0));
     }
 
     function test_consumesAllowVerdict() public {

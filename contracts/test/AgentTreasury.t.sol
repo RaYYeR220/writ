@@ -387,7 +387,7 @@ contract AgentTreasuryTest is Test {
         assertTrue(_has(logs, TransferRefused.selector));
         assertEq(dest.balance, 0);
         assertTrue(registry.isNotarized(id));
-        assertTrue(treasury.consumed(id));
+        assertTrue(treasury.consumed(registry.writId(PROVIDER, sha256(req), sha256(resp))));
         assertEq(treasury.nonce(), 1);
     }
 
