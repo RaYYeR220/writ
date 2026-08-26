@@ -72,10 +72,10 @@ contract PolicyGateFactoryTest is Test {
 
         bytes memory req = gate.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
 
         vm.prank(agent);
-        gate.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        gate.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 1 ether);
     }
 
@@ -89,10 +89,10 @@ contract PolicyGateFactoryTest is Test {
 
         bytes memory req = gate.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:80");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
 
         vm.prank(agent);
-        bool approved = gate.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = gate.execute(dest, 1 ether, resp, PROVIDER);
         assertFalse(approved);
         assertEq(dest.balance, 0);
     }
@@ -107,11 +107,11 @@ contract PolicyGateFactoryTest is Test {
 
         bytes memory req = gate.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(other, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.ProviderNotAllowed.selector, other, PROVIDER));
-        gate.execute(dest, 1 ether, resp, other, sig, bytes32(0));
+        gate.execute(dest, 1 ether, resp, other);
     }
 
     function test_deployedGateRefusesDeny() public {
@@ -121,11 +121,10 @@ contract PolicyGateFactoryTest is Test {
 
         bytes memory req = gate.previewRequestBody(dest, 5 ether);
         bytes memory resp = _respBody("DENY:91");
-        bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
 
         vm.prank(agent);
-        bool approved = gate.execute(dest, 5 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = gate.execute(dest, 5 ether, resp, PROVIDER);
         assertFalse(approved);
         assertEq(dest.balance, 0);
         assertTrue(registry.isNotarized(id));
@@ -143,11 +142,16 @@ contract PolicyGateFactoryTest is Test {
         bytes memory sig = _sign(friendly, resp);
 
         bytes memory canonical = gate.previewRequestBody(dest, 5 ether);
-        address wrong = WritLib.recoverSigner(sha256(canonical), sha256(resp), sig);
+        (bytes32 rq, bytes32 rs) = (sha256(canonical), sha256(resp));
+        address wrong = WritLib.recoverSigner(rq, rs, sig);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
-        gate.execute(dest, 5 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        gate.execute(dest, 5 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
     }
 

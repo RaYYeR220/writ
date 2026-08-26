@@ -193,51 +193,48 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     }
 
     /// @notice Move funds, but only against an attested ALLOW for this exact action.
-    /// @dev A verified refusal is not an error: it notarizes, emits `TransferRefused`, spends the
-    ///      nonce and returns false. Only a verification failure reverts.
+    /// @dev The proof must already be in `WritRegistry`. Notarize it first, in its own
+    ///      transaction — that is what keeps the record from sharing this transaction's fate. A
+    ///      recipient that rejects the transfer reverts the payout and nothing else: the writ, and
+    ///      the fact that this question was answered, stay on chain.
+    ///
+    ///      A verified refusal is not an error: it emits `TransferRefused`, spends the nonce and
+    ///      returns false. Only a proof that does not satisfy the gate reverts.
     ///
     ///      The zero recipient is rejected before any of that. An attested ALLOW naming
     ///      `address(0)` would burn the treasury exactly as a bad `recover` would, and no verdict
     ///      should be able to authorise that, so the check sits ahead of the proof rather than
     ///      inside the settlement.
     /// @return approved Whether the funds moved.
-    function execute(
-        address to,
-        uint256 amount,
-        bytes calldata rawResponse,
-        address provider,
-        bytes calldata signature,
-        bytes32 transcriptRoot
-    ) external nonReentrant returns (bool approved) {
+    function execute(address to, uint256 amount, bytes calldata rawResponse, address provider)
+        external
+        nonReentrant
+        returns (bool approved)
+    {
         if (msg.sender != agent) revert NotAgent(msg.sender);
         if (to == address(0)) revert ZeroRecipient();
 
         bytes memory params = buildParams(to, amount);
-        return _settle(to, amount, _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot));
+        return _settle(to, amount, _consume(POLICY_ID, params, rawResponse, provider));
     }
 
     /// @notice `execute` against a centralized provider's routing proof.
     /// @dev Most live 0G mainnet providers are centralized, so this is the path that reaches
-    ///      them. It also binds more: the proof names the upstream that actually answered.
+    ///      them. It also binds more: the proof names the upstream that actually answered. The
+    ///      routing writ must already be notarized, exactly as on the chat path.
     /// @return approved Whether the funds moved.
     function executeRoutingProof(
         address to,
         uint256 amount,
         bytes calldata rawResponse,
         address provider,
-        WritRegistry.RoutingProof calldata routing,
-        bytes calldata signature,
-        bytes32 transcriptRoot
+        WritRegistry.RoutingProof calldata routing
     ) external nonReentrant returns (bool approved) {
         if (msg.sender != agent) revert NotAgent(msg.sender);
         if (to == address(0)) revert ZeroRecipient();
 
         bytes memory params = buildParams(to, amount);
-        return _settle(
-            to,
-            amount,
-            _consumeRoutingProof(POLICY_ID, params, rawResponse, provider, routing, signature, transcriptRoot)
-        );
+        return _settle(to, amount, _consumeRoutingProof(POLICY_ID, params, rawResponse, provider, routing));
     }
 
     /// @dev Reached only once a proof has verified, so both proof kinds settle identically.

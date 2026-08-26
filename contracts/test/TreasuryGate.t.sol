@@ -71,9 +71,9 @@ contract TreasuryGateRecoveryTest is Test {
     function _attest(uint256 amount, string memory verdict) internal {
         bytes memory req = gate.previewRequestBody(dest, amount);
         bytes memory resp = _respBody(verdict);
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
         vm.prank(agent);
-        gate.execute(dest, amount, resp, PROVIDER, sig, bytes32(0));
+        gate.execute(dest, amount, resp, PROVIDER);
     }
 
     function test_ownerAndAgentAreDistinctRoles() public view {
@@ -179,16 +179,20 @@ contract TreasuryGateRecoveryTest is Test {
             WritLib.routingProofText(sha256(req), sha256(resp), "centralized", "openrouter", TLS_FP)
         );
         (uint8 v, bytes32 r, bytes32 sg) = vm.sign(TEE_PK, digest);
+        registry.notarizeRoutingProof(
+            PROVIDER,
+            sha256(req),
+            sha256(resp),
+            "centralized",
+            "openrouter",
+            TLS_FP,
+            abi.encodePacked(r, sg, v),
+            bytes32(0)
+        );
 
         vm.prank(agent);
         gate.executeRoutingProof(
-            dest,
-            1 ether,
-            resp,
-            PROVIDER,
-            WritRegistry.RoutingProof("centralized", "openrouter", TLS_FP),
-            abi.encodePacked(r, sg, v),
-            bytes32(0)
+            dest, 1 ether, resp, PROVIDER, WritRegistry.RoutingProof("centralized", "openrouter", TLS_FP)
         );
 
         assertEq(gate.lastAttestationAt(), uint64(block.timestamp));
@@ -201,7 +205,8 @@ contract TreasuryGateRecoveryTest is Test {
         gate.recover(rescue);
     }
 
-    /// A failed verification is not an attestation, so it must not move the clock.
+    /// A failed verification is not an attestation, so it must not move the clock. The forged
+    /// proof never reaches the gate at all: it cannot be notarized, so there is nothing to spend.
     function test_failedVerificationDoesNotPostponeRecovery() public {
         uint64 last = gate.lastAttestationAt();
         vm.warp(block.timestamp + 29 days);
@@ -212,10 +217,15 @@ contract TreasuryGateRecoveryTest is Test {
             abi.encodePacked("\x19Ethereum Signed Message:\n129", WritLib.signedText(sha256(req), sha256(resp)))
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(0xBADBAD), digest);
+        (bytes32 rq, bytes32 rs) = (sha256(req), sha256(resp));
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, vm.addr(0xBADBAD), tee));
-        gate.execute(dest, 1 ether, resp, PROVIDER, abi.encodePacked(r, s, v), bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, abi.encodePacked(r, s, v), bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        gate.execute(dest, 1 ether, resp, PROVIDER);
 
         assertEq(gate.lastAttestationAt(), last);
 

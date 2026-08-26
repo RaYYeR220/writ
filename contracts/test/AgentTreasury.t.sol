@@ -71,6 +71,18 @@ contract AgentTreasuryTest is Test {
         return WritRegistry.RoutingProof({providerType: P_TYPE, providerIdentity: P_IDENTITY, tlsFingerprint: TLS_FP});
     }
 
+    /// Notarizing stands alone now, so every settling test records the proof first — exactly the
+    /// two-transaction order the SDK already uses.
+    function _notarize(bytes memory req, bytes memory resp, bytes32 root) internal returns (bytes32) {
+        return registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), root);
+    }
+
+    function _notarizeRouting(bytes memory req, bytes memory resp, bytes32 root) internal returns (bytes32) {
+        return registry.notarizeRoutingProof(
+            PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP, _signRouting(req, resp), root
+        );
+    }
+
     function _has(Vm.Log[] memory logs, bytes32 topic) internal pure returns (bool) {
         for (uint256 i = 0; i < logs.length; ++i) {
             if (logs[i].topics[0] == topic) return true;
@@ -88,12 +100,11 @@ contract AgentTreasuryTest is Test {
     function test_movesFundsOnAttestedAllow() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = _notarize(req, resp, bytes32(0));
 
         vm.recordLogs();
         vm.prank(agent);
-        bool approved = treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = treasury.execute(dest, 1 ether, resp, PROVIDER);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertTrue(approved);
@@ -108,12 +119,11 @@ contract AgentTreasuryTest is Test {
     function test_recordsRefusalOnAttestedDeny() public {
         bytes memory req = treasury.previewRequestBody(dest, 9 ether);
         bytes memory resp = _respBody("DENY:91");
-        bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = _notarize(req, resp, bytes32(uint256(0xC0FFEE)));
 
         vm.recordLogs();
         vm.prank(agent);
-        bool approved = treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(uint256(0xC0FFEE)));
+        bool approved = treasury.execute(dest, 9 ether, resp, PROVIDER);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertFalse(approved);
@@ -140,12 +150,11 @@ contract AgentTreasuryTest is Test {
     function test_recordsRefusalOnAllowAboveCeiling() public {
         bytes memory req = treasury.previewRequestBody(dest, 9 ether);
         bytes memory resp = _respBody("ALLOW:80");
-        bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = _notarize(req, resp, bytes32(0));
 
         vm.recordLogs();
         vm.prank(agent);
-        bool approved = treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = treasury.execute(dest, 9 ether, resp, PROVIDER);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertFalse(approved);
@@ -163,24 +172,30 @@ contract AgentTreasuryTest is Test {
     }
 
     /// The refused verdict is spent. Asking again means asking again, not resubmitting: the
-    /// nonce has moved, so the old signature no longer answers the question the gate now asks.
+    /// nonce has moved, so the old signature no longer answers the question the gate now asks —
+    /// and the registry will not record it against the new one.
     function test_refusedVerdictCannotBeReplayed() public {
         bytes memory req = treasury.previewRequestBody(dest, 9 ether);
         bytes memory resp = _respBody("DENY:91");
         bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = _notarize(req, resp, bytes32(0));
 
         vm.prank(agent);
-        treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 9 ether, resp, PROVIDER);
         assertTrue(treasury.consumed(id));
 
         bytes memory nextReq = treasury.previewRequestBody(dest, 9 ether);
         assertTrue(keccak256(nextReq) != keccak256(req));
-        address wrong = WritLib.recoverSigner(sha256(nextReq), sha256(resp), sig);
+        (bytes32 rq, bytes32 rs) = (sha256(nextReq), sha256(resp));
+        address wrong = WritLib.recoverSigner(rq, rs, sig);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
-        treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 next = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, next));
+        treasury.execute(dest, 9 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
     }
 
@@ -190,13 +205,21 @@ contract AgentTreasuryTest is Test {
         bytes memory resp = _respBody("ALLOW:1");
         bytes memory sig = _sign(friendly, resp);
 
+        // The proof is genuine, so it records — as an answer to the attacker's own question.
+        registry.notarize(PROVIDER, sha256(friendly), sha256(resp), sig, bytes32(0));
+
         bytes memory canonical = treasury.previewRequestBody(dest, 9 ether);
-        address wrong = WritLib.recoverSigner(sha256(canonical), sha256(resp), sig);
+        (bytes32 rq, bytes32 rs) = (sha256(canonical), sha256(resp));
+        address wrong = WritLib.recoverSigner(rq, rs, sig);
         assertTrue(wrong != tee);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
-        treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.execute(dest, 9 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
         assertEq(treasury.nonce(), 0);
     }
@@ -206,24 +229,34 @@ contract AgentTreasuryTest is Test {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
         bytes memory sig = _signWith(IMPOSTOR_PK, req, resp);
+        (bytes32 rq, bytes32 rs) = (sha256(req), sha256(resp));
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, vm.addr(IMPOSTOR_PK), tee));
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
         assertEq(treasury.nonce(), 0);
     }
 
-    /// Attack: route through a model 0G serves without a TEE.
+    /// Attack: route through a model 0G serves without a TEE. It never gets on record.
     function test_refusesNonTeeModel() public {
         serving.set(PROVIDER, MODEL, "standard", tee, true);
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
+        (bytes32 rq, bytes32 rs) = (sha256(req), sha256(resp));
         bytes memory sig = _sign(req, resp);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotTeeVerifiable.selector, PROVIDER, "standard"));
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
     }
 
@@ -232,25 +265,31 @@ contract AgentTreasuryTest is Test {
         serving.set(PROVIDER, MODEL, "TeeML", tee, false);
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
+        (bytes32 rq, bytes32 rs) = (sha256(req), sha256(resp));
         bytes memory sig = _sign(req, resp);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.SignerNotAcknowledged.selector, PROVIDER));
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 id = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
     }
 
-    /// Attack: an acknowledged TeeML provider the policy does not name.
+    /// Attack: an acknowledged TeeML provider the policy does not name. The writ is perfectly
+    /// valid and on record; the gate still refuses it, because the policy names another provider.
     function test_refusesProviderOutsideThePolicy() public {
         address other = address(0xFEED);
         serving.set(other, MODEL, "TeeML", tee, true);
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(other, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.ProviderNotAllowed.selector, other, PROVIDER));
-        treasury.execute(dest, 1 ether, resp, other, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, other);
         assertEq(dest.balance, 0);
     }
 
@@ -259,7 +298,7 @@ contract AgentTreasuryTest is Test {
         serving.set(PROVIDER, "some-other-model", "TeeML", tee, true);
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
-        bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(
@@ -267,21 +306,23 @@ contract AgentTreasuryTest is Test {
                 PolicyGate.ModelNotAllowed.selector, keccak256(bytes("some-other-model")), keccak256(bytes(MODEL))
             )
         );
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
     }
 
-    /// A signed answer that does not obey the verdict grammar is not a decision at all.
+    /// A signed answer that does not obey the verdict grammar is not a decision at all. It is
+    /// still a fact about what the TEE signed, so the registry keeps it; the gate will not act.
     function test_refusesMalformedVerdict() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("probably fine");
-        bytes memory sig = _sign(req, resp);
+        bytes32 id = _notarize(req, resp, bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(VerdictLib.VerdictMalformed.selector);
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 0);
         assertEq(treasury.nonce(), 0);
+        assertTrue(registry.isNotarized(id));
     }
 
     /// Attack: reuse yesterday's approval for a new transfer.
@@ -289,26 +330,33 @@ contract AgentTreasuryTest is Test {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
         bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
 
         vm.prank(agent);
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
 
         bytes memory nextReq = treasury.previewRequestBody(dest, 1 ether);
-        address wrong = WritLib.recoverSigner(sha256(nextReq), sha256(resp), sig);
+        (bytes32 rq, bytes32 rs) = (sha256(nextReq), sha256(resp));
+        address wrong = WritLib.recoverSigner(rq, rs, sig);
 
-        vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        registry.notarize(PROVIDER, rq, rs, sig, bytes32(0));
+
+        bytes32 next = registry.writId(PROVIDER, rq, rs);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, next));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         assertEq(dest.balance, 1 ether);
     }
 
     function test_onlyAgentMayExecute() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
+
         vm.prank(address(0xBAD));
         vm.expectRevert(abi.encodeWithSelector(TreasuryGate.NotAgent.selector, address(0xBAD)));
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
     }
 
     /// The question the contract pins carries facts it derived itself, so the model has
@@ -406,17 +454,17 @@ contract AgentTreasuryTest is Test {
     function _approve(address payable to, uint256 amount) internal {
         bytes memory req = treasury.previewRequestBody(to, amount);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
         vm.prank(agent);
-        treasury.execute(to, amount, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(to, amount, resp, PROVIDER);
     }
 
     function _refuse(address payable to, uint256 amount) internal {
         bytes memory req = treasury.previewRequestBody(to, amount);
         bytes memory resp = _respBody("DENY:91");
-        bytes memory sig = _sign(req, resp);
+        registry.notarize(PROVIDER, sha256(req), sha256(resp), _sign(req, resp), bytes32(0));
         vm.prank(agent);
-        treasury.execute(to, amount, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(to, amount, resp, PROVIDER);
     }
 
     function _contains(bytes memory haystack, string memory needle) internal pure returns (bool) {
@@ -438,53 +486,53 @@ contract AgentTreasuryTest is Test {
     function test_recordsApprovalAndRefusesSecondUseOfSameWrit() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
-        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+        bytes32 id = _notarize(req, resp, bytes32(uint256(0xBEEF)));
 
         vm.prank(agent);
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(uint256(0xBEEF)));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
 
         assertTrue(registry.isNotarized(id));
         assertTrue(treasury.consumed(id));
         assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xBEEF)));
-        assertEq(registry.getWrit(id).notarizedBy, address(treasury));
+        // Whoever paid for the notarization is on the record, and it need not be the gate.
+        assertEq(registry.getWrit(id).notarizedBy, address(this));
     }
 
-    /// Records the cost of the whole path: pin the question, verify, notarize, pay out.
+    /// Records the cost of settling: pin the question, read the record back, pay out. The
+    /// notarization is a separate transaction and is measured in `WritRegistry.t.sol`.
     function test_measuresExecuteGas() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
         vm.prank(agent);
         uint256 before = gasleft();
-        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
         uint256 used = before - gasleft();
         console.log("execute gas (approved):", used);
-        assertLt(used, 500_000);
+        assertLt(used, 200_000);
     }
 
-    /// A refusal costs a notarization too — the record is the point.
     function test_measuresRefusalGas() public {
         bytes memory req = treasury.previewRequestBody(dest, 9 ether);
         bytes memory resp = _respBody("DENY:91");
-        bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
         vm.prank(agent);
         uint256 before = gasleft();
-        treasury.execute(dest, 9 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(dest, 9 ether, resp, PROVIDER);
         uint256 used = before - gasleft();
         console.log("execute gas (refused):", used);
-        assertLt(used, 500_000);
+        assertLt(used, 200_000);
     }
 
     /// An attested ALLOW to the zero address would burn the treasury as surely as a bad recover.
     function test_executeRevertsForZeroRecipient() public {
         bytes memory req = treasury.previewRequestBody(address(0), 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _sign(req, resp);
+        _notarize(req, resp, bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(TreasuryGate.ZeroRecipient.selector);
-        treasury.execute(address(0), 1 ether, resp, PROVIDER, sig, bytes32(0));
+        treasury.execute(address(0), 1 ether, resp, PROVIDER);
 
         assertEq(address(treasury).balance, 10 ether);
         assertEq(treasury.nonce(), 0);
@@ -493,11 +541,11 @@ contract AgentTreasuryTest is Test {
     function test_executeRoutingProofRevertsForZeroRecipient() public {
         bytes memory req = treasury.previewRequestBody(address(0), 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _signRouting(req, resp);
+        _notarizeRouting(req, resp, bytes32(0));
 
         vm.prank(agent);
         vm.expectRevert(TreasuryGate.ZeroRecipient.selector);
-        treasury.executeRoutingProof(address(0), 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        treasury.executeRoutingProof(address(0), 1 ether, resp, PROVIDER, _routing());
 
         assertEq(address(treasury).balance, 10 ether);
         assertEq(treasury.nonce(), 0);
@@ -507,11 +555,10 @@ contract AgentTreasuryTest is Test {
     function test_movesFundsOnAttestedRoutingProof() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _signRouting(req, resp);
-        bytes32 id = registry.routingWritId(PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP);
+        bytes32 id = _notarizeRouting(req, resp, bytes32(0));
 
         vm.prank(agent);
-        bool approved = treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        bool approved = treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
 
         assertTrue(approved);
         assertEq(dest.balance, 1 ether);
@@ -523,12 +570,11 @@ contract AgentTreasuryTest is Test {
     function test_recordsRefusalOnRoutingProofDeny() public {
         bytes memory req = treasury.previewRequestBody(dest, 9 ether);
         bytes memory resp = _respBody("DENY:91");
-        bytes memory sig = _signRouting(req, resp);
-        bytes32 id = registry.routingWritId(PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP);
+        bytes32 id = _notarizeRouting(req, resp, bytes32(0));
 
         vm.recordLogs();
         vm.prank(agent);
-        bool approved = treasury.executeRoutingProof(dest, 9 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        bool approved = treasury.executeRoutingProof(dest, 9 ether, resp, PROVIDER, _routing());
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertFalse(approved);
@@ -544,10 +590,15 @@ contract AgentTreasuryTest is Test {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:1");
         bytes memory sig = _signWith(IMPOSTOR_PK, req, resp);
+        (bytes32 rq, bytes32 rs) = (sha256(req), sha256(resp));
 
-        vm.prank(agent);
         vm.expectRevert();
-        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        registry.notarizeRoutingProof(PROVIDER, rq, rs, P_TYPE, P_IDENTITY, TLS_FP, sig, bytes32(0));
+
+        bytes32 id = registry.routingWritId(PROVIDER, rq, rs, P_TYPE, P_IDENTITY, TLS_FP);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
         assertEq(dest.balance, 0);
         assertEq(treasury.nonce(), 0);
     }
@@ -555,27 +606,81 @@ contract AgentTreasuryTest is Test {
     function test_onlyAgentMayExecuteRoutingProof() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _signRouting(req, resp);
+        _notarizeRouting(req, resp, bytes32(0));
+
         vm.prank(address(0xBAD));
         vm.expectRevert(abi.encodeWithSelector(TreasuryGate.NotAgent.selector, address(0xBAD)));
-        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
     }
 
     function test_measuresRoutingProofExecuteGas() public {
         bytes memory req = treasury.previewRequestBody(dest, 1 ether);
         bytes memory resp = _respBody("ALLOW:12");
-        bytes memory sig = _signRouting(req, resp);
+        _notarizeRouting(req, resp, bytes32(0));
         vm.prank(agent);
         uint256 before = gasleft();
-        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
         uint256 used = before - gasleft();
         console.log("executeRoutingProof gas (approved):", used);
-        assertLt(used, 600_000);
+        assertLt(used, 200_000);
     }
 
     function test_acceptsFunds() public {
         (bool ok,) = address(treasury).call{value: 1 ether}("");
         assertTrue(ok);
         assertEq(address(treasury).balance, 11 ether);
+    }
+
+    /// The asymmetry this closes: a refusal was permanent, but an approval that could not pay out
+    /// took the record down with it. Notarizing is now its own transaction, so nothing the
+    /// guarded action does can roll the record back.
+    function test_aRevertingRecipientLeavesTheNotarizationIntact() public {
+        RejectingRecipient sink = new RejectingRecipient();
+        bytes memory req = treasury.previewRequestBody(address(sink), 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 id = _notarize(req, resp, bytes32(uint256(0xBEEF)));
+
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.TransferFailed.selector, address(sink), 1 ether));
+        treasury.execute(address(sink), 1 ether, resp, PROVIDER);
+
+        // The settlement rolled back; the record did not.
+        assertTrue(registry.isNotarized(id));
+        assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xBEEF)));
+        assertEq(registry.getWrit(id).notarizedBy, address(this));
+        assertFalse(treasury.consumed(id));
+        assertEq(treasury.nonce(), 0);
+        assertEq(address(treasury).balance, 10 ether);
+    }
+
+    /// The gate never notarizes, so a proof nobody recorded is not a decision it can act on.
+    function test_executeRevertsWhenTheWritIsNotNotarized() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
+
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.execute(dest, 1 ether, resp, PROVIDER);
+        assertEq(dest.balance, 0);
+        assertEq(treasury.nonce(), 0);
+    }
+
+    function test_executeRoutingProofRevertsWhenTheWritIsNotNotarized() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 id = registry.routingWritId(PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP);
+
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritNotNotarized.selector, id));
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
+        assertEq(dest.balance, 0);
+        assertEq(treasury.nonce(), 0);
+    }
+}
+
+contract RejectingRecipient {
+    receive() external payable {
+        revert("no");
     }
 }

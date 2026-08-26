@@ -60,6 +60,9 @@ abstract contract PolicyGate {
     error ModelNotAllowed(bytes32 got, bytes32 want);
     error ProviderNotAllowed(address got, address want);
     error WritAlreadyConsumed(bytes32 id);
+    /// @notice The proof has not been recorded, so there is nothing for this gate to act on.
+    /// @dev Notarize it first, in its own transaction. See `_consume`.
+    error WritNotNotarized(bytes32 id);
     error UnknownPolicy(uint256 policyId);
 
     constructor(WritRegistry registry_) {
@@ -83,47 +86,45 @@ abstract contract PolicyGate {
         _policies[policyId] = p;
     }
 
-    /// @notice Verifies a proof answers this contract's own question, then renders its decision.
-    /// @dev A failure to *verify* reverts: the caller has not shown a decision at all. A verified
-    ///      refusal returns `approved == false` instead, so the notarization survives and the
-    ///      record is permanent. Fail-closed means the guarded action does not happen, not that
-    ///      the transaction disappears.
+    /// @notice Renders this contract's decision from a proof the registry has already recorded.
+    /// @dev The writ MUST be notarized first, in its own transaction. That ordering is structural,
+    ///      not a client convention: a gate that notarized inline would put the permanent record
+    ///      and the guarded action in one transaction, so an approval whose payout reverted would
+    ///      roll the record back with it and only refusals would survive. Notarizing separately
+    ///      makes every decision — approved, refused, or approved-but-unpayable — equally
+    ///      permanent. A writ that is not on record reverts `WritNotNotarized`.
+    ///
+    ///      A failure to *satisfy* the gate reverts too: the caller has not shown a decision that
+    ///      answers this contract's question. A verified refusal returns `approved == false`
+    ///      instead. Fail-closed means the guarded action does not happen, not that the record
+    ///      disappears.
     /// @dev `Decision.approved` and `Decision.refusedBy` always agree; the refuser is named so a
     ///      caller can tell the model declining from the policy overruling it.
-    function _consume(
-        uint256 policyId,
-        bytes memory params,
-        bytes memory rawResponse,
-        address provider,
-        bytes calldata signature,
-        bytes32 transcriptRoot
-    ) internal returns (Decision memory) {
+    function _consume(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider)
+        internal
+        returns (Decision memory)
+    {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
         // On this path the record and the decision are the same key.
         bytes32 id = decisionKey(provider, reqHash, respHash);
         if (consumed[id]) revert WritAlreadyConsumed(id);
-
-        // Notarizing is a public good; someone else may already have done it.
-        if (!registry.isNotarized(id)) {
-            registry.notarize(provider, reqHash, respHash, signature, transcriptRoot);
-        }
+        if (!registry.isNotarized(id)) revert WritNotNotarized(id);
 
         return _decide(policyId, id, id, rawResponse);
     }
 
     /// @notice `_consume` for a centralized provider, whose TEE signs the five-field routing text.
-    /// @dev Identical guarantees; only the signed format and the recorded writ differ. The
-    ///      decision is still spent under `decisionKey`, so a routing proof and a chat proof of
-    ///      the same answer cannot both authorise an action.
+    /// @dev Identical guarantees, including the requirement that the writ already be notarized;
+    ///      only the signed format and the recorded writ differ. The decision is still spent under
+    ///      `decisionKey`, so a routing proof and a chat proof of the same answer cannot both
+    ///      authorise an action.
     function _consumeRoutingProof(
         uint256 policyId,
         bytes memory params,
         bytes memory rawResponse,
         address provider,
-        WritRegistry.RoutingProof calldata routing,
-        bytes calldata signature,
-        bytes32 transcriptRoot
+        WritRegistry.RoutingProof calldata routing
     ) internal returns (Decision memory) {
         (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
@@ -131,9 +132,7 @@ abstract contract PolicyGate {
         if (consumed[decision]) revert WritAlreadyConsumed(decision);
 
         bytes32 id = _routingId(provider, reqHash, respHash, routing);
-        if (!registry.isNotarized(id)) {
-            _notarizeRouting(provider, reqHash, respHash, routing, signature, transcriptRoot);
-        }
+        if (!registry.isNotarized(id)) revert WritNotNotarized(id);
 
         return _decide(policyId, id, decision, rawResponse);
     }
@@ -156,26 +155,6 @@ abstract contract PolicyGate {
         );
     }
 
-    function _notarizeRouting(
-        address provider,
-        bytes32 reqHash,
-        bytes32 respHash,
-        WritRegistry.RoutingProof calldata routing,
-        bytes calldata signature,
-        bytes32 transcriptRoot
-    ) private {
-        registry.notarizeRoutingProof(
-            provider,
-            reqHash,
-            respHash,
-            routing.providerType,
-            routing.providerIdentity,
-            routing.tlsFingerprint,
-            signature,
-            transcriptRoot
-        );
-    }
-
     /// @dev Pins the question: the request body is this contract's own, so the hashes a proof
     ///      must match are not the caller's to choose.
     function _pin(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider)
@@ -194,7 +173,7 @@ abstract contract PolicyGate {
     }
 
     /// @dev Reads the notarized record back, enforces the policy's model, and renders the verdict.
-    /// @param id The writ to read the model from — the record that was just notarized.
+    /// @param id The writ to read the model from — a record that already exists on chain.
     /// @param decision The key to spend, which is the same as `id` only on the chat path.
     function _decide(uint256 policyId, bytes32 id, bytes32 decision, bytes memory rawResponse)
         private
