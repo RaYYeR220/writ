@@ -225,6 +225,15 @@ contract TreasuryGateRecoveryTest is Test {
         assertEq(rescue.balance, 10 ether);
     }
 
+    /// Sweeping to the zero address would burn the treasury it exists to rescue.
+    function test_recoverRevertsForZeroRecipient() public {
+        vm.warp(block.timestamp + 31 days);
+        vm.prank(owner);
+        vm.expectRevert(TreasuryGate.ZeroRecipient.selector);
+        gate.recover(address(0));
+        assertEq(address(gate).balance, 10 ether);
+    }
+
     function test_recoverRevertsWhenTheDestinationRejectsFunds() public {
         RejectsEther sink = new RejectsEther();
         vm.warp(block.timestamp + 31 days);

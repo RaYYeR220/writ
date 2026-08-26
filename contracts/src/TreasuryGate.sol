@@ -14,12 +14,15 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      any prompt, model, provider and risk ceiling without new Solidity.
 ///
 ///      The one route out that does not need a verdict is `recover`, which the owner may take
-///      only after `RECOVERY_DELAY` of provider silence. Without it a provider that stops
-///      serving signatures would brick the treasury permanently.
+///      only after `RECOVERY_DELAY` without a decision. Without it a provider that stops serving
+///      signatures would brick the treasury permanently. See `lastAttestationAt` for exactly what
+///      that delay measures — it is narrower than it sounds.
 contract TreasuryGate is PolicyGate, ReentrancyGuard {
     uint256 public constant POLICY_ID = 1;
 
-    /// @notice How long the provider must go silent before the owner may sweep the treasury.
+    /// @notice How long this gate must go without a decision before the owner may sweep it.
+    /// @dev Thirty days. Deliberately long: the hatch is a last resort for a treasury that would
+    ///      otherwise be stuck forever, not a routine withdrawal path.
     uint64 public constant RECOVERY_DELAY = 30 days;
 
     address public immutable agent;
@@ -32,11 +35,33 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
 
     /// @notice When this gate last saw a verifiable proof, approval or refusal alike.
     /// @dev Seeded at deployment so the escape hatch is not open the moment the gate exists.
+    ///
+    ///      Be precise about what this measures, because the name invites a stronger reading than
+    ///      it deserves. It is a timer on **this gate's inactivity**, not on the provider's
+    ///      liveness. The gate only learns that a provider is alive when the agent brings it a
+    ///      proof, so provider liveness is observed through the agent and cannot be separated
+    ///      from it. Three consequences follow, all of them intended:
+    ///
+    ///      1. An agent that keeps producing decisions postpones recovery indefinitely. Refusals
+    ///         count, because a refusal is as much evidence of a working provider as an approval
+    ///         is. So an agent that never approves anything but keeps paying gas for a refusal
+    ///         every few weeks can hold the treasury away from the owner for as long as it likes.
+    ///      2. An agent that simply stops asking hands the owner a sweep after `RECOVERY_DELAY`,
+    ///         even if the provider was healthy the whole time. From the gate's point of view a
+    ///         silent provider and an idle agent are the same event.
+    ///      3. Neither case is reachable by an outsider. The owner appoints the agent, so this is
+    ///         a trust assumption between those two parties rather than a vulnerability: whoever
+    ///         you appoint agent, you are trusting not to sit on the hatch.
+    ///
+    ///      The mechanism is what it is on purpose. Measuring provider liveness directly would
+    ///      mean trusting something other than a signature the provider actually produced, which
+    ///      is the one thing this contract refuses to do anywhere else.
     uint64 public lastAttestationAt;
 
     error NotAgent(address caller);
     error NotOwner(address caller);
     error RecoveryNotYetAvailable(uint64 availableAt);
+    error ZeroRecipient();
     error TransferFailed(address to, uint256 amount);
 
     event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
@@ -138,11 +163,20 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         return lastAttestationAt + RECOVERY_DELAY;
     }
 
-    /// @notice Sweep the treasury after the provider has gone silent for `RECOVERY_DELAY`.
+    /// @notice Sweep the treasury after this gate has gone `RECOVERY_DELAY` without a decision.
     /// @dev Bounded escape hatch, not an admin override: any verified proof, approval or
     ///      refusal, pushes the deadline back out of reach.
+    ///
+    ///      Read `lastAttestationAt` for what the delay does and does not measure. In short: this
+    ///      is a timer on the gate, so it protects the owner against a dead provider and against
+    ///      an agent that has stopped working, but it does not protect the owner against an agent
+    ///      that keeps working and simply never approves anything.
+    ///
+    ///      The recipient is the owner's to choose, so the only check here is that it is not the
+    ///      zero address — sweeping there would burn the treasury this function exists to rescue.
     function recover(address to) external nonReentrant {
         if (msg.sender != owner) revert NotOwner(msg.sender);
+        if (to == address(0)) revert ZeroRecipient();
 
         uint64 availableAt = recoveryAvailableAt();
         // a 30-day window dwarfs any timestamp drift a validator could induce
