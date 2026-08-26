@@ -23,7 +23,9 @@ contract MockInferenceServing is IInferenceServing {
         s.teeSignerAcknowledged = acknowledged;
     }
 
+    /// @dev Mirrors the live contract, which reverts rather than returning an empty struct.
     function getService(address provider) external view returns (Service memory) {
+        if (_services[provider].provider == address(0)) revert ServiceNotExist(provider);
         return _services[provider];
     }
 }

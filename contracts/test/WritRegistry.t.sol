@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
+import {IInferenceServing} from "../src/interfaces/IInferenceServing.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
 
 contract WritRegistryTest is Test {
@@ -74,6 +75,13 @@ contract WritRegistryTest is Test {
         bytes32 id = registry.writId(PROVIDER, REQ_H, RESP_H);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotNotarized.selector, id));
         registry.getWrit(id);
+    }
+
+    /// The live registry reverts for a provider it has never seen; that must fail closed too.
+    function test_revertsForUnregisteredProvider() public {
+        address ghost = address(0xC0FFEE);
+        vm.expectRevert(abi.encodeWithSelector(IInferenceServing.ServiceNotExist.selector, ghost));
+        registry.notarize(ghost, REQ_H, RESP_H, SIG, ROOT);
     }
 
     function test_anyoneMayNotarize() public {

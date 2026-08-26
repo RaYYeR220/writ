@@ -20,5 +20,8 @@ interface IInferenceServing {
         bool teeSignerAcknowledged;
     }
 
+    /// @notice Raised by the live contract when the provider has never registered a service.
+    error ServiceNotExist(address provider);
+
     function getService(address provider) external view returns (Service memory);
 }
