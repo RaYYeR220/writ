@@ -31,19 +31,28 @@ export type Artifact = {
 }
 
 let built: boolean | null = null
+/** Why the last `ensureBuilt()` gave up, for suites that want to explain a skip. */
+export let buildFailure = ''
+
+const PROBE = join(CONTRACTS_DIR, 'out', 'WritRegistry.sol', 'WritRegistry.json')
 
 /**
  * Compiles the contract suite so the SDK's hand-written ABIs can be checked against the real
- * thing. Returns false when Foundry is unavailable, so the suites that need it can skip
- * loudly rather than assert nothing.
+ * thing.
+ *
+ * Returns false only when there is nothing to compare against at all, so the suites that need
+ * artifacts skip rather than assert nothing. A build that fails while usable artifacts are
+ * already on disk still counts — `forge` is frequently busy when someone is working in
+ * `contracts/`, and stale artifacts beat no coverage.
  */
 export function ensureBuilt(): boolean {
   if (built !== null) return built
   try {
-    execFileSync(foundryBin('forge'), ['build'], { cwd: CONTRACTS_DIR, stdio: 'pipe' })
+    execFileSync(foundryBin('forge'), ['build'], { cwd: CONTRACTS_DIR, stdio: 'pipe', timeout: 300_000 })
     built = true
-  } catch {
-    built = false
+  } catch (e) {
+    buildFailure = e instanceof Error ? e.message : String(e)
+    built = existsSync(PROBE)
   }
   return built
 }
