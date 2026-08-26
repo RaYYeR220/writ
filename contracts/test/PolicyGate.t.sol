@@ -11,6 +11,7 @@ import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
 
 contract PolicyGateTest is Test {
     uint256 constant TEE_PK = 0x1111111111111111111111111111111111111111111111111111111111111111;
+    uint256 constant IMPOSTOR_PK = 0xBADBAD;
     address constant PROVIDER = address(0xBEEF);
     string constant MODEL = "0GM-1.0-35B-A3B";
     uint256 constant PID = 1;
@@ -47,10 +48,14 @@ contract PolicyGateTest is Test {
 
     /// Signs the way a 0G provider TEE does: over `sha256hex(req):sha256hex(resp)`, EIP-191.
     function _sign(bytes memory req, bytes memory resp) internal pure returns (bytes memory) {
+        return _signWith(TEE_PK, req, resp);
+    }
+
+    function _signWith(uint256 pk, bytes memory req, bytes memory resp) internal pure returns (bytes memory) {
         bytes32 digest = keccak256(
             abi.encodePacked("\x19Ethereum Signed Message:\n129", WritLib.signedText(sha256(req), sha256(resp)))
         );
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
@@ -59,27 +64,62 @@ contract PolicyGateTest is Test {
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
 
-        (bytes32 id, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        (bytes32 id, bool approved, uint8 risk) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertTrue(approved);
         assertEq(risk, 12);
         assertTrue(gate.consumed(id));
         assertTrue(registry.isNotarized(id));
     }
 
-    function test_revertsOnDenyVerdict() public {
+    /// A refusal is a decision, not an error: it is notarized and recorded, not rolled back.
+    function test_recordsDenyVerdictAsARefusal() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("DENY:87");
+
+        (bytes32 id, bool approved, uint8 risk) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertFalse(approved);
+        assertEq(risk, 87);
+        assertTrue(registry.isNotarized(id));
+        assertTrue(gate.consumed(id));
+    }
+
+    /// An ALLOW the policy will not accept is refused exactly like a DENY.
+    function test_recordsAllowAboveCeilingAsARefusal() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:80");
+
+        (bytes32 id, bool approved, uint8 risk) =
+            gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertFalse(approved);
+        assertEq(risk, 80);
+        assertTrue(registry.isNotarized(id));
+        assertTrue(gate.consumed(id));
+    }
+
+    /// A risk exactly at the ceiling is still an approval.
+    function test_approvesRiskExactlyAtTheCeiling() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:50");
+
+        (, bool approved, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, _sign(req, resp), bytes32(0));
+        assertTrue(approved);
+        assertEq(risk, 50);
+    }
+
+    /// The decision has been rendered, so the same proof cannot be submitted a second time.
+    function test_refusedWritCannotBeReplayed() public {
         bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("DENY:87");
         bytes memory sig = _sign(req, resp);
-        vm.expectRevert(abi.encodeWithSelector(PolicyGate.VerdictDenied.selector, uint8(87)));
-        gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
-    }
 
-    function test_revertsWhenRiskExceedsCeiling() public {
-        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
-        bytes memory req = gate.buildRequestBody(PID, params);
-        bytes memory resp = _respBody("ALLOW:80");
-        bytes memory sig = _sign(req, resp);
-        vm.expectRevert(abi.encodeWithSelector(PolicyGate.RiskTooHigh.selector, uint8(80), uint8(50)));
+        (bytes32 id,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
 
@@ -90,7 +130,21 @@ contract PolicyGateTest is Test {
         bytes memory sig = _sign(friendlyReq, resp);
 
         bytes memory params = bytes("recipient=0x01 amount=999999 nonce=0");
-        vm.expectRevert();
+        bytes memory canonicalReq = gate.buildRequestBody(PID, params);
+        address wrong = WritLib.recoverSigner(sha256(canonicalReq), sha256(resp), sig);
+        assertTrue(wrong != tee);
+
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
+        gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+    }
+
+    function test_revertsOnForgedSignature() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _signWith(IMPOSTOR_PK, req, resp);
+
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, vm.addr(IMPOSTOR_PK), tee));
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
 
@@ -119,12 +173,33 @@ contract PolicyGateTest is Test {
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
 
+    /// 0G also serves models without a TEE; those carry `verifiability: "standard"`.
+    function test_revertsWhenProviderIsNotTeeVerifiable() public {
+        serving.set(PROVIDER, MODEL, "standard", tee, true);
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _sign(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotTeeVerifiable.selector, PROVIDER, "standard"));
+        gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+    }
+
+    function test_revertsWhenSignerIsNotAcknowledged() public {
+        serving.set(PROVIDER, MODEL, "TeeML", tee, false);
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _sign(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.SignerNotAcknowledged.selector, PROVIDER));
+        gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+    }
+
     function test_revertsWhenWritAlreadyConsumed() public {
         bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
         bytes memory req = gate.buildRequestBody(PID, params);
         bytes memory resp = _respBody("ALLOW:12");
         bytes memory sig = _sign(req, resp);
-        (bytes32 id,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        (bytes32 id,,) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
         gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
     }
@@ -139,7 +214,8 @@ contract PolicyGateTest is Test {
         vm.prank(address(0xABCD));
         registry.notarize(PROVIDER, sha256(req), sha256(resp), sig, bytes32(0));
 
-        (, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        (, bool approved, uint8 risk) = gate.consume(PID, params, resp, PROVIDER, sig, bytes32(0));
+        assertTrue(approved);
         assertEq(risk, 12);
     }
 
@@ -155,6 +231,15 @@ contract PolicyGateTest is Test {
     function test_revertsOnUnknownPolicy() public {
         vm.expectRevert(abi.encodeWithSelector(PolicyGate.UnknownPolicy.selector, uint256(99)));
         gate.buildRequestBody(99, bytes("x"));
+    }
+
+    function test_revertsWhenConsumingAnUnknownPolicy() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _sign(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.UnknownPolicy.selector, uint256(99)));
+        gate.consume(99, params, resp, PROVIDER, sig, bytes32(0));
     }
 
     function test_buildRequestBodyPinsTheQuestion() public view {

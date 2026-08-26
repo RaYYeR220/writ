@@ -19,7 +19,7 @@ contract PolicyGateHarness is PolicyGate {
         address provider,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) external returns (bytes32 id, uint8 risk) {
+    ) external returns (bytes32 id, bool approved, uint8 risk) {
         return _consume(policyId, params, rawResponse, provider, signature, transcriptRoot);
     }
 }

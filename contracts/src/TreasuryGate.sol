@@ -22,6 +22,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     error TransferFailed(address to, uint256 amount);
 
     event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
+    event TransferRefused(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
 
     constructor(WritRegistry registry_, address agent_, Policy memory policy) PolicyGate(registry_) {
         agent = agent_;
@@ -43,6 +44,9 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     }
 
     /// @notice Move funds, but only against an attested ALLOW for this exact action.
+    /// @dev A verified refusal is not an error: it notarizes, emits `TransferRefused`, spends the
+    ///      nonce and returns false. Only a verification failure reverts.
+    /// @return approved Whether the funds moved.
     function execute(
         address to,
         uint256 amount,
@@ -50,15 +54,24 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         address provider,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) external nonReentrant {
+    ) external nonReentrant returns (bool approved) {
         if (msg.sender != agent) revert NotAgent(msg.sender);
 
         bytes memory params = buildParams(to, amount, nonce);
-        (bytes32 id, uint8 risk) = _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot);
+        uint8 risk;
+        bytes32 id;
+        (id, approved, risk) = _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot);
 
+        // A refused action must be re-asked, not retried against a stale question.
         unchecked {
             ++nonce;
         }
+
+        if (!approved) {
+            emit TransferRefused(to, amount, risk, id);
+            return false;
+        }
+
         emit TransferApproved(to, amount, risk, id);
 
         (bool ok,) = to.call{value: amount}("");

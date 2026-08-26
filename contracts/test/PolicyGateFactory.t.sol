@@ -78,7 +78,7 @@ contract PolicyGateFactoryTest is Test {
     }
 
     /// The gate must run on the policy it was handed, not on a factory default.
-    function test_gateEnforcesTheCeilingItWasGiven() public {
+    function test_gateRefusesAboveTheCeilingItWasGiven() public {
         vm.prank(owner);
         TreasuryGate gate = TreasuryGate(payable(factory.deployGate(_policy(10), agent)));
         vm.deal(address(gate), 10 ether);
@@ -90,8 +90,8 @@ contract PolicyGateFactoryTest is Test {
         bytes memory sig = _sign(req, resp);
 
         vm.prank(agent);
-        vm.expectRevert(abi.encodeWithSelector(PolicyGate.RiskTooHigh.selector, uint8(80), uint8(10)));
-        gate.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = gate.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        assertFalse(approved);
         assertEq(dest.balance, 0);
     }
 
@@ -120,11 +120,14 @@ contract PolicyGateFactoryTest is Test {
         bytes memory req = gate.previewRequestBody(dest, 5 ether);
         bytes memory resp = _respBody("DENY:91");
         bytes memory sig = _sign(req, resp);
+        bytes32 id = registry.writId(PROVIDER, sha256(req), sha256(resp));
 
         vm.prank(agent);
-        vm.expectRevert(abi.encodeWithSelector(PolicyGate.VerdictDenied.selector, uint8(91)));
-        gate.execute(dest, 5 ether, resp, PROVIDER, sig, bytes32(0));
+        bool approved = gate.execute(dest, 5 ether, resp, PROVIDER, sig, bytes32(0));
+        assertFalse(approved);
         assertEq(dest.balance, 0);
+        assertTrue(registry.isNotarized(id));
+        assertTrue(gate.consumed(id));
     }
 
     /// The gate builds its own question from the stored policy, so a swapped prompt fails.
@@ -137,8 +140,11 @@ contract PolicyGateFactoryTest is Test {
         bytes memory resp = _respBody("ALLOW:1");
         bytes memory sig = _sign(friendly, resp);
 
+        bytes memory canonical = gate.previewRequestBody(dest, 5 ether);
+        address wrong = WritLib.recoverSigner(sha256(canonical), sha256(resp), sig);
+
         vm.prank(agent);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.BadSignature.selector, wrong, tee));
         gate.execute(dest, 5 ether, resp, PROVIDER, sig, bytes32(0));
         assertEq(dest.balance, 0);
     }

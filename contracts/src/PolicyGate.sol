@@ -29,8 +29,6 @@ abstract contract PolicyGate {
 
     error ModelNotAllowed(bytes32 got, bytes32 want);
     error ProviderNotAllowed(address got, address want);
-    error VerdictDenied(uint8 risk);
-    error RiskTooHigh(uint8 risk, uint8 maxRisk);
     error WritAlreadyConsumed(bytes32 id);
     error UnknownPolicy(uint256 policyId);
 
@@ -55,9 +53,14 @@ abstract contract PolicyGate {
         _policies[policyId] = p;
     }
 
-    /// @notice Verifies a proof answers this contract's own question, then enforces the verdict.
-    /// @return id The writ identifier, now marked consumed.
-    /// @return risk The approved risk score.
+    /// @notice Verifies a proof answers this contract's own question, then renders its decision.
+    /// @dev A failure to *verify* reverts: the caller has not shown a decision at all. A verified
+    ///      refusal returns `approved == false` instead, so the notarization survives and the
+    ///      record is permanent. Fail-closed means the guarded action does not happen, not that
+    ///      the transaction disappears.
+    /// @return id The writ identifier, now marked consumed whichever way the decision went.
+    /// @return approved True only for an ALLOW within the policy's risk ceiling.
+    /// @return risk The risk score the model reported.
     function _consume(
         uint256 policyId,
         bytes memory params,
@@ -65,7 +68,7 @@ abstract contract PolicyGate {
         address provider,
         bytes calldata signature,
         bytes32 transcriptRoot
-    ) internal returns (bytes32 id, uint8 risk) {
+    ) internal returns (bytes32 id, bool approved, uint8 risk) {
         Policy storage p = _policies[policyId];
         if (p.promptHead.length == 0) revert UnknownPolicy(policyId);
         if (p.allowedProvider != address(0) && p.allowedProvider != provider) {
@@ -86,11 +89,12 @@ abstract contract PolicyGate {
         WritRegistry.Writ memory w = registry.getWrit(id);
         if (w.modelHash != p.allowedModelHash) revert ModelNotAllowed(w.modelHash, p.allowedModelHash);
 
+        // A malformed answer is not a refusal — it is an unverifiable answer, so it reverts.
         (bool allowed, uint8 reported) = VerdictLib.parseVerdict(rawResponse);
-        if (!allowed) revert VerdictDenied(reported);
-        if (reported > p.maxRisk) revert RiskTooHigh(reported, p.maxRisk);
 
+        // The decision is rendered either way, so the writ is spent either way.
         consumed[id] = true;
         risk = reported;
+        approved = allowed && reported <= p.maxRisk;
     }
 }
