@@ -126,6 +126,33 @@ contract WritLibTest is Test {
         }
     }
 
+    /// The broker's `signImageResponse` builds `sha256hex(req):strings.Join(imgHashes, ",")`.
+    /// With ONE image `Join` returns the hash unchanged, so the text is byte-identical to a chat
+    /// proof and nothing can tell the two apart. `WritLib`'s comment says exactly that rather
+    /// than claiming the image format is rejected, which would be false for this case.
+    function test_aSingleImageProofIsByteIdenticalToAChatProof() public pure {
+        bytes32 imgHash = RESP_H;
+        bytes memory oneImage = abi.encodePacked(WritLib.hex64(REQ_H), ":", WritLib.hex64(imgHash));
+
+        assertEq(oneImage.length, 129);
+        assertEq(keccak256(oneImage), keccak256(WritLib.signedText(REQ_H, imgHash)));
+        // So it verifies as a chat proof, because it IS one as far as the bytes go.
+        assertEq(WritLib.recoverSigner(REQ_H, imgHash, SIG), SIGNER);
+    }
+
+    /// Two or more images is the case that genuinely cannot be mistaken for a chat proof: the
+    /// second field is a comma-joined list, which no single hash reproduces.
+    function test_aMultiImageProofCannotBeReadAsAChatProof() public pure {
+        bytes32 first = REQ_H;
+        bytes32 second = RESP_H;
+        bytes memory twoImages =
+            abi.encodePacked(WritLib.hex64(REQ_H), ":", WritLib.hex64(first), ",", WritLib.hex64(second));
+
+        assertEq(twoImages.length, 194);
+        assertTrue(keccak256(twoImages) != keccak256(WritLib.signedText(REQ_H, first)));
+        assertTrue(keccak256(twoImages) != keccak256(WritLib.signedText(REQ_H, second)));
+    }
+
     function test_hex64IsLowercaseAndZeroPadded() public pure {
         assertEq(
             string(WritLib.hex64(bytes32(uint256(0x0a)))),

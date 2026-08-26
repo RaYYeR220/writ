@@ -15,9 +15,20 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 ///        1. chatbot / video / speech on a decentralized provider -> `signedText`, 129 bytes.
 ///        2. image generation -> `sha256hex(req):sha256hex(img0),sha256hex(img1),...`.
 ///        3. any centralized provider -> `routingProofText`, five `:`-joined fields.
-///      Formats 1 and 3 are implemented here. Format 2 is deliberately NOT supported: its
+///      Formats 1 and 3 are implemented here. Format 2 is deliberately NOT built: its
 ///      comma-joined image list needs its own binding rules, and a half-implementation would
 ///      verify signatures over a text whose meaning we have not pinned down.
+///
+///      Be exact about what that does and does not exclude. `signImageResponse` builds
+///      `sha256hex(req) + ":" + strings.Join(imgHashes, ",")`. For TWO OR MORE images the second
+///      field is a comma-joined list, which is not a 64-character hash, so `signedText` cannot
+///      reproduce it and such a proof simply fails recovery. For ONE image `strings.Join` returns
+///      the hash unchanged: the text is exactly the 129-byte two-field shape of a chat proof and
+///      is INDISTINGUISHABLE from one. Nothing here rejects it and nothing here could — the bytes
+///      are identical. What such a writ records is still true (the TEE did sign that request
+///      against that artifact), but its `respHash` would be the hash of image bytes rather than
+///      of an HTTP response body. Practical impact is low; the claim that the image format is
+///      rejected would be false, so it is not made.
 library WritLib {
     bytes16 private constant HEX_DIGITS = "0123456789abcdef";
 
