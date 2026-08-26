@@ -22,4 +22,16 @@ contract PolicyGateHarness is PolicyGate {
     ) external returns (bytes32 id, bool approved, uint8 risk) {
         return _consume(policyId, params, rawResponse, provider, signature, transcriptRoot);
     }
+
+    function consumeRoutingProof(
+        uint256 policyId,
+        bytes memory params,
+        bytes memory rawResponse,
+        address provider,
+        WritRegistry.RoutingProof calldata routing,
+        bytes calldata signature,
+        bytes32 transcriptRoot
+    ) external returns (bytes32 id, bool approved, uint8 risk) {
+        return _consumeRoutingProof(policyId, params, rawResponse, provider, routing, signature, transcriptRoot);
+    }
 }

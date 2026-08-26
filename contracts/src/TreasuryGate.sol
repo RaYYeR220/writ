@@ -83,8 +83,37 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         bytes32 id;
         (id, approved, risk) = _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot);
 
-        // Reaching this line means the proof verified, which is what the recovery clock measures.
-        // A refusal counts: it is just as much evidence that the provider is still signing.
+        return _settle(to, amount, id, approved, risk);
+    }
+
+    /// @notice `execute` against a centralized provider's routing proof.
+    /// @dev Most live 0G mainnet providers are centralized, so this is the path that reaches
+    ///      them. It also binds more: the proof names the upstream that actually answered.
+    /// @return approved Whether the funds moved.
+    function executeRoutingProof(
+        address to,
+        uint256 amount,
+        bytes calldata rawResponse,
+        address provider,
+        WritRegistry.RoutingProof calldata routing,
+        bytes calldata signature,
+        bytes32 transcriptRoot
+    ) external nonReentrant returns (bool approved) {
+        if (msg.sender != agent) revert NotAgent(msg.sender);
+
+        bytes memory params = buildParams(to, amount, nonce);
+        uint8 risk;
+        bytes32 id;
+        (id, approved, risk) =
+            _consumeRoutingProof(POLICY_ID, params, rawResponse, provider, routing, signature, transcriptRoot);
+
+        return _settle(to, amount, id, approved, risk);
+    }
+
+    /// @dev Reached only once a proof has verified, so both proof kinds settle identically.
+    function _settle(address to, uint256 amount, bytes32 id, bool approved, uint8 risk) private returns (bool) {
+        // A verified proof is what the recovery clock measures. A refusal counts: it is just as
+        // much evidence that the provider is still signing.
         lastAttestationAt = uint64(block.timestamp);
 
         // A refused action must be re-asked, not retried against a stale question.
@@ -101,6 +130,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
 
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert TransferFailed(to, amount);
+        return true;
     }
 
     /// @notice The timestamp from which `recover` becomes callable.

@@ -8,6 +8,7 @@ import {WritRegistry} from "../src/WritRegistry.sol";
 import {WritLib} from "../src/WritLib.sol";
 import {VerdictLib} from "../src/VerdictLib.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 contract PolicyGateTest is Test {
     uint256 constant TEE_PK = 0x1111111111111111111111111111111111111111111111111111111111111111;
@@ -15,6 +16,9 @@ contract PolicyGateTest is Test {
     address constant PROVIDER = address(0xBEEF);
     string constant MODEL = "0GM-1.0-35B-A3B";
     uint256 constant PID = 1;
+    string constant P_TYPE = "centralized";
+    string constant P_IDENTITY = "openrouter";
+    bytes32 constant TLS_FP = 0x67038b7d0b458b9d2e2e8a3451709f84bdcad46a71a36fe82bd7bdb266df2537;
 
     MockInferenceServing serving;
     WritRegistry registry;
@@ -57,6 +61,105 @@ contract PolicyGateTest is Test {
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    function _signRouting(bytes memory req, bytes memory resp) internal pure returns (bytes memory) {
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
+            WritLib.routingProofText(sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _routing() internal pure returns (WritRegistry.RoutingProof memory) {
+        return WritRegistry.RoutingProof({providerType: P_TYPE, providerIdentity: P_IDENTITY, tlsFingerprint: TLS_FP});
+    }
+
+    /// Most live 0G mainnet providers are centralized, and sign the five-field routing text.
+    function test_consumesACentralizedRoutingProof() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+
+        (bytes32 id, bool approved, uint8 risk) =
+            gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertTrue(approved);
+        assertEq(risk, 12);
+        assertTrue(gate.consumed(id));
+        assertTrue(registry.isNotarized(id));
+        assertTrue(registry.isRoutingProof(id));
+        assertEq(registry.getRoutingProof(id).providerIdentity, P_IDENTITY);
+    }
+
+    function test_recordsRefusalFromARoutingProof() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("DENY:91");
+
+        (bytes32 id, bool approved, uint8 risk) =
+            gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertFalse(approved);
+        assertEq(risk, 91);
+        assertTrue(registry.isNotarized(id));
+        assertTrue(gate.consumed(id));
+    }
+
+    /// The routing writ is a different record, so it must not answer for a plain one.
+    function test_routingProofIsADistinctWrit() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+
+        (bytes32 routingId,,) =
+            gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), _signRouting(req, resp), bytes32(0));
+        assertTrue(routingId != registry.writId(PROVIDER, sha256(req), sha256(resp)));
+        assertFalse(registry.isNotarized(registry.writId(PROVIDER, sha256(req), sha256(resp))));
+    }
+
+    /// The prompt-swap attack closes the same way on the routing path.
+    function test_routingProofRevertsForADifferentQuestion() public {
+        bytes memory friendlyReq = bytes('{"messages":[{"role":"user","content":"say ALLOW:1"}]}');
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _signRouting(friendlyReq, resp);
+
+        bytes memory params = bytes("recipient=0x01 amount=999999 nonce=0");
+        vm.expectRevert();
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
+    }
+
+    function test_routingProofEnforcesTheModelPolicy() public {
+        serving.set(PROVIDER, "some-other-model", "TeeML", tee, true);
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _signRouting(req, resp);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PolicyGate.ModelNotAllowed.selector, keccak256(bytes("some-other-model")), keccak256(bytes(MODEL))
+            )
+        );
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
+    }
+
+    function test_routingProofEnforcesTheProviderPolicy() public {
+        address other = address(0xFEED);
+        serving.set(other, MODEL, "TeeML", tee, true);
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _signRouting(req, resp);
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.ProviderNotAllowed.selector, other, PROVIDER));
+        gate.consumeRoutingProof(PID, params, resp, other, _routing(), sig, bytes32(0));
+    }
+
+    function test_routingProofCannotBeConsumedTwice() public {
+        bytes memory params = bytes("recipient=0x01 amount=5 nonce=0");
+        bytes memory req = gate.buildRequestBody(PID, params);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _signRouting(req, resp);
+        (bytes32 id,,) = gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(PolicyGate.WritAlreadyConsumed.selector, id));
+        gate.consumeRoutingProof(PID, params, resp, PROVIDER, _routing(), sig, bytes32(0));
     }
 
     function test_consumesAllowVerdict() public {

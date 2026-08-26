@@ -69,14 +69,7 @@ abstract contract PolicyGate {
         bytes calldata signature,
         bytes32 transcriptRoot
     ) internal returns (bytes32 id, bool approved, uint8 risk) {
-        Policy storage p = _policies[policyId];
-        if (p.promptHead.length == 0) revert UnknownPolicy(policyId);
-        if (p.allowedProvider != address(0) && p.allowedProvider != provider) {
-            revert ProviderNotAllowed(provider, p.allowedProvider);
-        }
-
-        bytes32 reqHash = sha256(buildRequestBody(policyId, params));
-        bytes32 respHash = sha256(rawResponse);
+        (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
 
         id = registry.writId(provider, reqHash, respHash);
         if (consumed[id]) revert WritAlreadyConsumed(id);
@@ -85,6 +78,86 @@ abstract contract PolicyGate {
         if (!registry.isNotarized(id)) {
             registry.notarize(provider, reqHash, respHash, signature, transcriptRoot);
         }
+
+        (approved, risk) = _decide(policyId, id, rawResponse);
+    }
+
+    /// @notice `_consume` for a centralized provider, whose TEE signs the five-field routing text.
+    /// @dev Identical guarantees; only the signed format and the writ identifier differ.
+    function _consumeRoutingProof(
+        uint256 policyId,
+        bytes memory params,
+        bytes memory rawResponse,
+        address provider,
+        WritRegistry.RoutingProof calldata routing,
+        bytes calldata signature,
+        bytes32 transcriptRoot
+    ) internal returns (bytes32 id, bool approved, uint8 risk) {
+        (bytes32 reqHash, bytes32 respHash) = _pin(policyId, params, rawResponse, provider);
+
+        id = _routingId(provider, reqHash, respHash, routing);
+        if (consumed[id]) revert WritAlreadyConsumed(id);
+
+        if (!registry.isNotarized(id)) {
+            _notarizeRouting(provider, reqHash, respHash, routing, signature, transcriptRoot);
+        }
+
+        (approved, risk) = _decide(policyId, id, rawResponse);
+    }
+
+    function _routingId(address provider, bytes32 reqHash, bytes32 respHash, WritRegistry.RoutingProof calldata routing)
+        private
+        view
+        returns (bytes32)
+    {
+        return registry.routingWritId(
+            provider, reqHash, respHash, routing.providerType, routing.providerIdentity, routing.tlsFingerprint
+        );
+    }
+
+    function _notarizeRouting(
+        address provider,
+        bytes32 reqHash,
+        bytes32 respHash,
+        WritRegistry.RoutingProof calldata routing,
+        bytes calldata signature,
+        bytes32 transcriptRoot
+    ) private {
+        registry.notarizeRoutingProof(
+            provider,
+            reqHash,
+            respHash,
+            routing.providerType,
+            routing.providerIdentity,
+            routing.tlsFingerprint,
+            signature,
+            transcriptRoot
+        );
+    }
+
+    /// @dev Pins the question: the request body is this contract's own, so the hashes a proof
+    ///      must match are not the caller's to choose.
+    function _pin(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider)
+        private
+        view
+        returns (bytes32 reqHash, bytes32 respHash)
+    {
+        Policy storage p = _policies[policyId];
+        if (p.promptHead.length == 0) revert UnknownPolicy(policyId);
+        if (p.allowedProvider != address(0) && p.allowedProvider != provider) {
+            revert ProviderNotAllowed(provider, p.allowedProvider);
+        }
+
+        reqHash = sha256(buildRequestBody(policyId, params));
+        respHash = sha256(rawResponse);
+    }
+
+    /// @dev Reads the notarized record back, enforces the policy's model, and renders the verdict.
+    function _decide(uint256 policyId, bytes32 id, bytes memory rawResponse)
+        private
+        returns (bool approved, uint8 risk)
+    {
+        Policy storage p = _policies[policyId];
 
         WritRegistry.Writ memory w = registry.getWrit(id);
         if (w.modelHash != p.allowedModelHash) revert ModelNotAllowed(w.modelHash, p.allowedModelHash);

@@ -10,6 +10,14 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 ///      TEE's secp256k1 key using the EIP-191 personal-sign prefix. Because both sides are
 ///      bound in one signature, a caller that knows the raw bytes can prove the question as
 ///      well as the answer.
+///
+///      The broker signs three different texts depending on how the request was served:
+///        1. chatbot / video / speech on a decentralized provider -> `signedText`, 129 bytes.
+///        2. image generation -> `sha256hex(req):sha256hex(img0),sha256hex(img1),...`.
+///        3. any centralized provider -> `routingProofText`, five `:`-joined fields.
+///      Formats 1 and 3 are implemented here. Format 2 is deliberately NOT supported: its
+///      comma-joined image list needs its own binding rules, and a half-implementation would
+///      verify signatures over a text whose meaning we have not pinned down.
 library WritLib {
     bytes16 private constant HEX_DIGITS = "0123456789abcdef";
 
@@ -33,6 +41,44 @@ library WritLib {
     /// @return The recovered address. Callers must compare it to the provider's registered signer.
     function recoverSigner(bytes32 reqHash, bytes32 respHash, bytes memory signature) internal pure returns (address) {
         bytes32 digest = MessageHashUtils.toEthSignedMessageHash(signedText(reqHash, respHash));
+        return ECDSA.recover(digest, signature);
+    }
+
+    /// @notice Rebuilds the text a centralized provider's TEE signs for a routing proof.
+    /// @dev Byte-identical to `FormatRoutingProofText` in the broker's `api/common/tee/tls.go`:
+    ///      `req:resp:providerType:providerIdentity:tlsCertFingerprint`. The broker normalises the
+    ///      fingerprint to exactly 32 hex-encoded bytes, so `hex64` reproduces it and, like the
+    ///      two content hashes, it provably cannot smuggle a `:` into the field split. The two
+    ///      label fields are free text, so a caller must bound them itself — see `WritRegistry`.
+    ///
+    ///      This binds more than the chat format does: the TLS certificate fingerprint proves
+    ///      which upstream actually served the request.
+    function routingProofText(
+        bytes32 reqHash,
+        bytes32 respHash,
+        string memory providerType,
+        string memory providerIdentity,
+        bytes32 tlsFingerprint
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            hex64(reqHash), ":", hex64(respHash), ":", providerType, ":", providerIdentity, ":", hex64(tlsFingerprint)
+        );
+    }
+
+    /// @notice Recovers the TEE signing address from a centralized routing proof.
+    /// @dev The text is variable length, which is fine: `toEthSignedMessageHash` derives the
+    ///      EIP-191 decimal length prefix from the bytes rather than assuming a fixed one.
+    function recoverRoutingProofSigner(
+        bytes32 reqHash,
+        bytes32 respHash,
+        string memory providerType,
+        string memory providerIdentity,
+        bytes32 tlsFingerprint,
+        bytes memory signature
+    ) internal pure returns (address) {
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
+            routingProofText(reqHash, respHash, providerType, providerIdentity, tlsFingerprint)
+        );
         return ECDSA.recover(digest, signature);
     }
 }

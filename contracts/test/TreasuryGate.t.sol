@@ -8,6 +8,7 @@ import {PolicyGate} from "../src/PolicyGate.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {WritLib} from "../src/WritLib.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /// @dev Covers the escape hatch: if the 0G Compute provider stops producing signatures the
 ///      treasury would otherwise be bricked, so the owner may sweep it after a long silence.
@@ -31,6 +32,8 @@ contract TreasuryGateRecoveryTest is Test {
     address owner = address(0x0FE);
     address payable dest = payable(address(0xD1));
     address payable rescue = payable(address(0xF00D));
+
+    bytes32 constant TLS_FP = 0x67038b7d0b458b9d2e2e8a3451709f84bdcad46a71a36fe82bd7bdb266df2537;
 
     function setUp() public {
         vm.warp(1_700_000_000);
@@ -164,6 +167,38 @@ contract TreasuryGateRecoveryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(TreasuryGate.RecoveryNotYetAvailable.selector, availableAt));
         gate.recover(rescue);
         assertEq(address(gate).balance, 10 ether);
+    }
+
+    /// A centralized provider's routing proof is evidence of liveness just the same.
+    function test_routingProofPostponesRecovery() public {
+        vm.warp(block.timestamp + 29 days);
+
+        bytes memory req = gate.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
+            WritLib.routingProofText(sha256(req), sha256(resp), "centralized", "openrouter", TLS_FP)
+        );
+        (uint8 v, bytes32 r, bytes32 sg) = vm.sign(TEE_PK, digest);
+
+        vm.prank(agent);
+        gate.executeRoutingProof(
+            dest,
+            1 ether,
+            resp,
+            PROVIDER,
+            WritRegistry.RoutingProof("centralized", "openrouter", TLS_FP),
+            abi.encodePacked(r, sg, v),
+            bytes32(0)
+        );
+
+        assertEq(gate.lastAttestationAt(), uint64(block.timestamp));
+        assertEq(dest.balance, 1 ether);
+
+        uint64 availableAt = gate.lastAttestationAt() + gate.RECOVERY_DELAY();
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.RecoveryNotYetAvailable.selector, availableAt));
+        gate.recover(rescue);
     }
 
     /// A failed verification is not an attestation, so it must not move the clock.

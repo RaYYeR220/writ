@@ -16,6 +16,21 @@ contract WritRegistryTest is Test {
     bytes32 constant ROOT = bytes32(uint256(0xA11CE));
     string constant MODEL = "0GM-1.0-35B-A3B";
 
+    // Centralized routing proof over the same request/response pair, same key.
+    string constant P_TYPE = "centralized";
+    string constant P_IDENTITY = "openrouter";
+    bytes32 constant TLS_FP = 0x67038b7d0b458b9d2e2e8a3451709f84bdcad46a71a36fe82bd7bdb266df2537;
+    bytes constant ROUTING_SIG =
+        hex"6af690cde50dc856c6a8d024219aa0843eb3c9c90c287f0b59b90173f5a326a564b3208392697ac4a3744220a6f7bb39729d36274510bdf33a704e6422dfb3e31c";
+
+    event RoutingProofNotarized(
+        bytes32 indexed id,
+        address indexed provider,
+        string providerType,
+        string providerIdentity,
+        bytes32 tlsFingerprint
+    );
+
     MockInferenceServing serving;
     WritRegistry registry;
 
@@ -91,6 +106,130 @@ contract WritRegistryTest is Test {
         address ghost = address(0xC0FFEE);
         vm.expectRevert(abi.encodeWithSelector(IInferenceServing.ServiceNotExist.selector, ghost));
         registry.notarize(ghost, REQ_H, RESP_H, SIG, ROOT);
+    }
+
+    function test_notarizesCentralizedRoutingProof() public {
+        bytes32 id =
+            registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+        assertEq(id, registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP));
+        assertTrue(registry.isNotarized(id));
+        assertTrue(registry.isRoutingProof(id));
+
+        WritRegistry.Writ memory w = registry.getWrit(id);
+        assertEq(w.provider, PROVIDER);
+        assertEq(w.modelHash, keccak256(bytes(MODEL)));
+        assertEq(w.reqHash, REQ_H);
+        assertEq(w.respHash, RESP_H);
+        assertEq(w.transcriptRoot, ROOT);
+
+        WritRegistry.RoutingProof memory p = registry.getRoutingProof(id);
+        assertEq(p.providerType, P_TYPE);
+        assertEq(p.providerIdentity, P_IDENTITY);
+        assertEq(p.tlsFingerprint, TLS_FP);
+        assertEq(registry.writCount(), 1);
+    }
+
+    function test_emitsRoutingProofNotarized() public {
+        vm.expectEmit(true, true, true, true, address(registry));
+        emit RoutingProofNotarized(
+            registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP),
+            PROVIDER,
+            P_TYPE,
+            P_IDENTITY,
+            TLS_FP
+        );
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    /// The two proof kinds are domain-separated, so the same pair can hold both without colliding.
+    function test_routingWritIdDoesNotCollideWithPlainWritId() public {
+        bytes32 plain = registry.writId(PROVIDER, REQ_H, RESP_H);
+        bytes32 routing = registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP);
+        assertTrue(plain != routing);
+
+        registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+
+        assertFalse(registry.isRoutingProof(plain));
+        assertTrue(registry.isRoutingProof(routing));
+        assertEq(registry.writCount(), 2);
+    }
+
+    /// Two routing proofs that differ only in attribution are different writs.
+    function test_routingWritIdBindsTheMetadata() public view {
+        bytes32 a = registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP);
+        assertTrue(a != registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, "aliyun", TLS_FP));
+        assertTrue(a != registry.routingWritId(PROVIDER, REQ_H, RESP_H, "decentralized", P_IDENTITY, TLS_FP));
+        assertTrue(
+            a != registry.routingWritId(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, bytes32(uint256(TLS_FP) + 1))
+        );
+    }
+
+    function test_getRoutingProofRevertsForAPlainWrit() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotARoutingProof.selector, id));
+        registry.getRoutingProof(id);
+    }
+
+    /// The `:`-joined format is ambiguous under field splitting, so a delimiter in a label could
+    /// record a valid proof under mis-attributed metadata. Reject it before it is recorded.
+    function test_rejectsColonInProviderType() public {
+        vm.expectRevert(WritRegistry.RoutingFieldHasDelimiter.selector);
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, "centralized:open", "router", TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_rejectsColonInProviderIdentity() public {
+        vm.expectRevert(WritRegistry.RoutingFieldHasDelimiter.selector);
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, "centralized", "open:router", TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_rejectsOverLongRoutingField() public {
+        string memory long = "0123456789012345678901234567890123";
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.RoutingFieldTooLong.selector, uint256(34)));
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, long, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_rejectsEmptyRoutingField() public {
+        vm.expectRevert(WritRegistry.RoutingFieldEmpty.selector);
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, "", P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_routingProofRequiresAcknowledgedSigner() public {
+        serving.set(PROVIDER, MODEL, "TeeML", TEE, false);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.SignerNotAcknowledged.selector, PROVIDER));
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_routingProofRequiresTeeML() public {
+        serving.set(PROVIDER, MODEL, "standard", TEE, true);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotTeeVerifiable.selector, PROVIDER, "standard"));
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    /// Swapping the recorded identity changes the signed text, so recovery fails.
+    function test_routingProofRejectsMisattributedIdentity() public {
+        vm.expectRevert();
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, "aliyun", TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_routingProofRejectsAChatSignature() public {
+        vm.expectRevert();
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, SIG, ROOT);
+    }
+
+    function test_revertsOnDuplicateRoutingNotarization() public {
+        bytes32 id =
+            registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.AlreadyNotarized.selector, id));
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+    }
+
+    function test_measuresRoutingNotarizeGas() public {
+        uint256 before = gasleft();
+        registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+        uint256 used = before - gasleft();
+        console.log("notarizeRoutingProof gas:", used);
+        assertLt(used, 400_000);
     }
 
     function test_anyoneMayNotarize() public {

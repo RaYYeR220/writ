@@ -10,12 +10,16 @@ import {WritRegistry} from "../src/WritRegistry.sol";
 import {WritLib} from "../src/WritLib.sol";
 import {VerdictLib} from "../src/VerdictLib.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 contract AgentTreasuryTest is Test {
     uint256 constant TEE_PK = 0x1111111111111111111111111111111111111111111111111111111111111111;
     uint256 constant IMPOSTOR_PK = 0xBADBAD;
     address constant PROVIDER = address(0xBEEF);
     string constant MODEL = "0GM-1.0-35B-A3B";
+    string constant P_TYPE = "centralized";
+    string constant P_IDENTITY = "openrouter";
+    bytes32 constant TLS_FP = 0x67038b7d0b458b9d2e2e8a3451709f84bdcad46a71a36fe82bd7bdb266df2537;
 
     event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
     event TransferRefused(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId);
@@ -51,6 +55,18 @@ contract AgentTreasuryTest is Test {
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    function _signRouting(bytes memory req, bytes memory resp) internal pure returns (bytes memory) {
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
+            WritLib.routingProofText(sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEE_PK, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _routing() internal pure returns (WritRegistry.RoutingProof memory) {
+        return WritRegistry.RoutingProof({providerType: P_TYPE, providerIdentity: P_IDENTITY, tlsFingerprint: TLS_FP});
     }
 
     function _has(Vm.Log[] memory logs, bytes32 topic) internal pure returns (bool) {
@@ -336,6 +352,76 @@ contract AgentTreasuryTest is Test {
         uint256 used = before - gasleft();
         console.log("execute gas (refused):", used);
         assertLt(used, 500_000);
+    }
+
+    /// The same gate, driven by a centralized provider's five-field routing proof.
+    function test_movesFundsOnAttestedRoutingProof() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _signRouting(req, resp);
+        bytes32 id = registry.routingWritId(PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP);
+
+        vm.prank(agent);
+        bool approved = treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+
+        assertTrue(approved);
+        assertEq(dest.balance, 1 ether);
+        assertEq(treasury.nonce(), 1);
+        assertTrue(registry.isRoutingProof(id));
+        assertEq(registry.getRoutingProof(id).tlsFingerprint, TLS_FP);
+    }
+
+    function test_recordsRefusalOnRoutingProofDeny() public {
+        bytes memory req = treasury.previewRequestBody(dest, 9 ether);
+        bytes memory resp = _respBody("DENY:91");
+        bytes memory sig = _signRouting(req, resp);
+        bytes32 id = registry.routingWritId(PROVIDER, sha256(req), sha256(resp), P_TYPE, P_IDENTITY, TLS_FP);
+
+        vm.recordLogs();
+        vm.prank(agent);
+        bool approved = treasury.executeRoutingProof(dest, 9 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertFalse(approved);
+        assertFalse(_has(logs, TransferApproved.selector));
+        assertTrue(_has(logs, TransferRefused.selector));
+        assertEq(dest.balance, 0);
+        assertTrue(registry.isNotarized(id));
+        assertTrue(treasury.consumed(id));
+        assertEq(treasury.nonce(), 1);
+    }
+
+    function test_routingProofRefusesForgedSignature() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:1");
+        bytes memory sig = _signWith(IMPOSTOR_PK, req, resp);
+
+        vm.prank(agent);
+        vm.expectRevert();
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        assertEq(dest.balance, 0);
+        assertEq(treasury.nonce(), 0);
+    }
+
+    function test_onlyAgentMayExecuteRoutingProof() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _signRouting(req, resp);
+        vm.prank(address(0xBAD));
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.NotAgent.selector, address(0xBAD)));
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+    }
+
+    function test_measuresRoutingProofExecuteGas() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _signRouting(req, resp);
+        vm.prank(agent);
+        uint256 before = gasleft();
+        treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing(), sig, bytes32(0));
+        uint256 used = before - gasleft();
+        console.log("executeRoutingProof gas (approved):", used);
+        assertLt(used, 600_000);
     }
 
     function test_acceptsFunds() public {
