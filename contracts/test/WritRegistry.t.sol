@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {IInferenceServing} from "../src/interfaces/IInferenceServing.sol";
 import {MockInferenceServing} from "./mocks/MockInferenceServing.sol";
@@ -75,6 +75,15 @@ contract WritRegistryTest is Test {
         bytes32 id = registry.writId(PROVIDER, REQ_H, RESP_H);
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.NotNotarized.selector, id));
         registry.getWrit(id);
+    }
+
+    /// Records the full on-chain cost of verifying a proof and recording it forever.
+    function test_measuresNotarizeGas() public {
+        uint256 before = gasleft();
+        registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        uint256 used = before - gasleft();
+        console.log("notarize gas:", used);
+        assertLt(used, 300_000);
     }
 
     /// The live registry reverts for a provider it has never seen; that must fail closed too.

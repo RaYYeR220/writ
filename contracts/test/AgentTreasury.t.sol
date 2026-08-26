@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {AgentTreasury} from "../src/examples/AgentTreasury.sol";
 import {TreasuryGate} from "../src/TreasuryGate.sol";
 import {PolicyGate} from "../src/PolicyGate.sol";
@@ -145,6 +145,19 @@ contract AgentTreasuryTest is Test {
         assertTrue(treasury.consumed(id));
         assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xBEEF)));
         assertEq(registry.getWrit(id).notarizedBy, address(treasury));
+    }
+
+    /// Records the cost of the whole path: pin the question, verify, notarize, pay out.
+    function test_measuresExecuteGas() public {
+        bytes memory req = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _sign(req, resp);
+        vm.prank(agent);
+        uint256 before = gasleft();
+        treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
+        uint256 used = before - gasleft();
+        console.log("execute gas:", used);
+        assertLt(used, 500_000);
     }
 
     function test_acceptsFunds() public {

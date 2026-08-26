@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {WritLib} from "../src/WritLib.sol";
+import {WritLibHarness} from "./harness/WritLibHarness.sol";
 
 /// @dev Constants come from `script/gen-fixtures.mjs` run with key 0x11..11; rerun it to reproduce.
 contract WritLibTest is Test {
@@ -41,6 +42,18 @@ contract WritLibTest is Test {
     function test_sha256PrecompileBindsRawRequestBytes() public pure {
         bytes memory raw = bytes('{"model":"0GM-1.0-35B-A3B","messages":[{"role":"user","content":"POLICY-TEST"}]}');
         assertEq(sha256(raw), REQ_H);
+    }
+
+    /// Records the cost of one complete proof verification: rebuild the signed text, apply the
+    /// EIP-191 prefix, and recover the signer.
+    function test_measuresVerificationGas() public {
+        WritLibHarness h = new WritLibHarness();
+        uint256 before = gasleft();
+        address signer = h.recoverSigner(REQ_H, RESP_H, SIG);
+        uint256 used = before - gasleft();
+        assertEq(signer, SIGNER);
+        console.log("recoverSigner gas:", used);
+        assertLt(used, 100_000);
     }
 
     function test_hex64IsLowercaseAndZeroPadded() public pure {
