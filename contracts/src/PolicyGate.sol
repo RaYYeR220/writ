@@ -98,6 +98,19 @@ abstract contract PolicyGate {
     ///      answers this contract's question. A verified refusal returns `approved == false`
     ///      instead. Fail-closed means the guarded action does not happen, not that the record
     ///      disappears.
+    ///
+    ///      WHAT THIS GATE CHECKS, AND WHEN. It reads a record; it does not re-verify one. The
+    ///      TEE signature, the provider's `TeeML` verifiability and 0G's acknowledgement of its
+    ///      signer are all checked once, by `WritRegistry`, at the moment the proof is recorded.
+    ///      They are not read again here, and there is no signature argument to read them
+    ///      against. That is the design, not a shortcut: a permanent record is a statement about
+    ///      a moment, and re-deriving it later would mean a writ's meaning changed with the
+    ///      registry's later state. A proof recorded while 0G vouched for its provider stays a
+    ///      proof of what that provider signed, whatever 0G says afterwards.
+    ///
+    ///      So read the model check for what it is. The gate enforces that the recorded writ
+    ///      names this policy's provider and model, and that its answer obeys the verdict
+    ///      grammar. It does not enforce that 0G still acknowledges that provider today.
     /// @dev `Decision.approved` and `Decision.refusedBy` always agree; the refuser is named so a
     ///      caller can tell the model declining from the policy overruling it.
     function _consume(uint256 policyId, bytes memory params, bytes memory rawResponse, address provider)
