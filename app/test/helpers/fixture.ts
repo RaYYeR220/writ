@@ -1,6 +1,6 @@
 import { Wallet, keccak256, toUtf8Bytes } from 'ethers'
 import { sha256Hex, signedText, utf8 } from '@/lib/hashes'
-import type { ServiceRecord, VerifySources, WritRecord } from '@/lib/verify'
+import type { ServiceRecord, TranscriptCandidate, VerifySources, WritRecord } from '@/lib/verify'
 import { writId } from '@/lib/verify'
 import type { Transcript } from '@/lib/transcript'
 
@@ -20,6 +20,19 @@ export const STRANGER_KEY = '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d33
 
 export const PROVIDER = '0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9'
 export const MODEL = '0GM-1.0-35B-A3B'
+
+/** The pointer the honest archivist published, and the address that published it. */
+export const GOOD_ROOT = '0x' + '11'.repeat(32)
+export const ARCHIVIST = '0x2e6b8Dc19A05F34Eb7c0d5a8F2913e6bC47a0D82'
+
+/**
+ * A pointer someone else got in first with.
+ *
+ * Notarization is permissionless, so anyone who learns a chat id can publish a root before the
+ * real archivist does. The reader's job is to make that irrelevant.
+ */
+export const JUNK_ROOT = '0x' + '99'.repeat(32)
+export const FRONT_RUNNER = '0x000000000000000000000000000000000000dEaD'
 
 export const QUESTION = JSON.stringify({
   model: MODEL,
@@ -84,10 +97,8 @@ export async function buildFixture(
     modelHash: keccak256(toUtf8Bytes(MODEL)),
     reqHash,
     respHash,
-    // Filled by the caller when the transcript bytes matter; the verifier only compares hashes.
-    transcriptRoot: '0x' + '11'.repeat(32),
     notarizedAt: 1_787_000_000,
-    notarizedBy: '0x2e6b8Dc19A05F34Eb7c0d5a8F2913e6bC47a0D82',
+    notarizedBy: ARCHIVIST,
     isRouting: false,
   }
 
@@ -105,16 +116,35 @@ export async function buildFixture(
   return { writ, transcript, service, teeSigner: registered.address }
 }
 
-/** Turns a fixture into the three public reads the verifier makes, with overrides for the tests. */
+/**
+ * Turns a fixture into the four public reads the verifier makes, with overrides for the tests.
+ *
+ * `roots` is the candidate list the registry would return, in submission order, and `archive`
+ * says what each root actually leads to. By default there is one candidate, published by the
+ * honest archivist, holding the fixture's own transcript — so a test only has to describe the
+ * part of the world it cares about.
+ */
 export function sourcesFor(
   fixture: Fixture,
   overrides: {
     writ?: Partial<WritRecord>
     service?: Partial<ServiceRecord> | 'unreachable'
+    /** What `GOOD_ROOT` holds. `'unavailable'` makes 0G Storage refuse to serve it. */
     transcript?: Transcript | 'unavailable'
+    /** The published candidates. `'unreadable'` makes the registry itself refuse to list them. */
+    roots?: TranscriptCandidate[] | 'unreadable'
+    /** What any other root leads to. Anything unlisted is simply not in 0G Storage. */
+    archive?: Record<string, Transcript | 'unavailable'>
   } = {},
 ): VerifySources {
   const writ = { ...fixture.writ, ...overrides.writ }
+  const archive: Record<string, Transcript | 'unavailable'> = {
+    [GOOD_ROOT.toLowerCase()]: overrides.transcript ?? fixture.transcript,
+    ...Object.fromEntries(
+      Object.entries(overrides.archive ?? {}).map(([root, value]) => [root.toLowerCase(), value]),
+    ),
+  }
+
   return {
     async getWrit() {
       return writ
@@ -123,12 +153,16 @@ export function sourcesFor(
       if (overrides.service === 'unreachable') throw new Error('the registry did not answer')
       return { ...fixture.service, ...overrides.service }
     },
-    async getTranscript() {
-      if (overrides.transcript === 'unavailable') {
+    async listTranscriptRoots() {
+      if (overrides.roots === 'unreadable') throw new Error('the node refused the call')
+      return overrides.roots ?? [{ root: GOOD_ROOT, submitter: ARCHIVIST }]
+    },
+    async getTranscript(root: string) {
+      const held = archive[root.toLowerCase()]
+      if (held === undefined || held === 'unavailable') {
         throw new Error('0G Storage indexer answered: File not found (code 101)')
       }
-      const t = overrides.transcript ?? fixture.transcript
-      return { bytes: new TextEncoder().encode(JSON.stringify(t, null, 2)), source: 'a test fixture' }
+      return { bytes: new TextEncoder().encode(JSON.stringify(held, null, 2)), source: 'a test fixture' }
     },
   }
 }

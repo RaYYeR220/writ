@@ -1,7 +1,40 @@
 import type { EventLog } from 'ethers'
 import { registryContract, servingContract } from './chain'
+import type { RawWrit } from './contracts'
+import type { RoutingFields } from './hashes'
 import { fetchTranscriptBytes } from './storage'
-import type { ServiceRecord, VerifySources, WritRecord } from './verify'
+import type { ServiceRecord, TranscriptCandidate, VerifySources, WritRecord } from './verify'
+
+/**
+ * `WritRegistry.Writ` → the record this app renders, read by position.
+ *
+ * Pulled out of the reader below so the mapping can be tested on its own. It is the riskiest
+ * decode in the app: the tuple has no names on the wire, so a field added or removed on chain
+ * shifts every later one and the page captions the wrong value without anything throwing.
+ * `test/abi.test.ts` encodes a writ whose fields are all distinguishable and checks each one
+ * lands under the right name.
+ */
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+export function decodeWrit(
+  id: string,
+  w: RawWrit,
+  isRouting: boolean,
+  routing?: RoutingFields,
+): WritRecord {
+  const record: WritRecord = {
+    id,
+    provider: String(w[0]),
+    modelHash: String(w[1]),
+    reqHash: String(w[2]),
+    respHash: String(w[3]),
+    notarizedAt: Number(w[4]),
+    notarizedBy: String(w[5]),
+    isRouting,
+  }
+  if (routing) record.routing = routing
+  return record
+}
 
 /**
  * The verifier, wired to public sources and nothing else.
@@ -17,27 +50,34 @@ export function chainSources(signal?: AbortSignal): VerifySources {
       const w = await registry.getWrit(id)
       const isRouting: boolean = await registry.isRoutingProof(id)
 
-      const record: WritRecord = {
-        id,
-        provider: String(w[0]),
-        modelHash: String(w[1]),
-        reqHash: String(w[2]),
-        respHash: String(w[3]),
-        transcriptRoot: String(w[4]),
-        notarizedAt: Number(w[5]),
-        notarizedBy: String(w[6]),
-        isRouting,
-      }
-
+      let routing: RoutingFields | undefined
       if (isRouting) {
         const r = await registry.getRoutingProof(id)
-        record.routing = {
+        routing = {
           providerType: String(r[0]),
           providerIdentity: String(r[1]),
           tlsFingerprint: String(r[2]),
         }
       }
-      return record
+      return decodeWrit(id, w, isRouting, routing)
+    },
+
+    /**
+     * Every archive pointer published for this writ, in submission order, with its submitter.
+     *
+     * The list is read whole, then each root's submitter is read back individually — the pair a
+     * reader wants is the pointer to try and whose claim it is if it turns out to be junk, and
+     * `transcriptRoots` alone does not carry the second half.
+     */
+    async listTranscriptRoots(id: string): Promise<TranscriptCandidate[]> {
+      const registry = registryContract()
+      const roots = await registry.transcriptRoots(id)
+      return Promise.all(
+        roots.map(async (root) => ({
+          root: String(root),
+          submitter: String(await registry.transcriptSubmitter(id, String(root)).catch(() => ZERO_ADDRESS)),
+        })),
+      )
     },
 
     async getService(provider: string): Promise<ServiceRecord> {

@@ -17,6 +17,7 @@ import {
   emptyRows,
   runProofChain,
   tamperCase,
+  type CandidateOutcome,
   type ProofChain,
   type ProofRow,
   type WritRecord,
@@ -143,7 +144,15 @@ export function WritDetail({ id }: { id: string }) {
 
         <Ruler risk={risk} ceiling={ceiling} held={held} sideClass={sideClass} />
 
-        <Bytes writ={writ} transcript={transcript} sideClass={sideClass} source={chain?.transcriptSource ?? null} />
+        <Bytes
+          writ={writ}
+          transcript={transcript}
+          sideClass={sideClass}
+          source={chain?.transcriptSource ?? null}
+          acceptedRoot={chain?.acceptedRoot ?? null}
+          candidates={chain?.candidates ?? []}
+          row={rows.find((r) => r.key === 'transcript')}
+        />
 
         <VerifyBar running={running} onVerify={() => void verify()} summary={summary} />
 
@@ -365,11 +374,17 @@ function Bytes({
   transcript,
   sideClass,
   source,
+  acceptedRoot,
+  candidates,
+  row,
 }: {
   writ: WritRecord | null
   transcript: Transcript | null
   sideClass: string
   source: string | null
+  acceptedRoot: string | null
+  candidates: CandidateOutcome[]
+  row: ProofRow | undefined
 }) {
   const [rawQuestion, setRawQuestion] = useState(false)
 
@@ -435,18 +450,91 @@ function Bytes({
         <h3 className="h5" style={{ marginTop: 26 }}>
           Transcript · 0G Storage
         </h3>
-        <p className="hexline">root {writ ? writ.transcriptRoot : '…'}</p>
-        <p className="note" style={{ marginTop: 6 }}>
-          {source ? (
-            <>
-              Retrieved from <b>{source}</b>, then rebuilt to that merkle root here before anything was read out of it.
-            </>
-          ) : (
-            <>The root is content-addressed, so the bytes are checked against it before being trusted.</>
-          )}
-        </p>
+        <TranscriptRoots acceptedRoot={acceptedRoot} candidates={candidates} source={source} row={row} />
       </div>
     </div>
+  )
+}
+
+/**
+ * The archive pointers, all of them, with the arithmetic that settled which one is real.
+ *
+ * There is no single `transcriptRoot` to print any more, and that absence is the feature. The
+ * TEE never signed a pointer, and notarizing is permissionless, so whoever got there first used
+ * to fix the archive pointer forever — including someone who learned a chat id and published
+ * junk. Now every candidate is listed, anyone may append one, and the page shows which one
+ * actually re-derives the writ's own hashes rather than which one arrived first.
+ */
+function TranscriptRoots({
+  acceptedRoot,
+  candidates,
+  source,
+  row,
+}: {
+  acceptedRoot: string | null
+  candidates: CandidateOutcome[]
+  source: string | null
+  /** The transcript check itself, so this panel can never contradict the row above it. */
+  row: ProofRow | undefined
+}) {
+  // Before the list has been read there is nothing to say about it. An empty array here means
+  // "not asked yet", and reporting that as "nobody published one" would be this page inventing
+  // a fact it has not checked — the one thing it exists not to do.
+  if (!row || row.state === 'idle' || row.state === 'running') {
+    return (
+      <p className="dimmer" style={{ fontStyle: 'italic' }}>
+        reading the archive pointers published for this writ…
+      </p>
+    )
+  }
+
+  // No candidates and no list: the check's own reason covers both "nobody published one" and
+  // "the registry would not answer", which are very different things and must not be merged.
+  if (candidates.length === 0) {
+    return <p className="note">{row.reason}</p>
+  }
+
+  return (
+    <>
+      <ol className="roots">
+        {candidates.map((c) => (
+          <li key={`${c.index}-${c.root}`} className={`root ${c.state}`}>
+            <p className="hexline">{c.root}</p>
+            <p className="pms" style={{ margin: '2px 0 0' }}>
+              {c.state === 'accepted' ? 're-derives this writ' : c.state === 'untried' ? 'not fetched' : c.reason}
+              {' · published by '}
+              <span className="mono">{c.submitter}</span>
+            </p>
+          </li>
+        ))}
+      </ol>
+      <p className="note" style={{ marginTop: 8 }}>
+        {acceptedRoot ? (
+          <>
+            {candidates.length === 1 ? (
+              <>One pointer was published, and it re-derives.</>
+            ) : (
+              <>
+                {candidates.length} pointers were published; the accepted one is the first whose bytes sha256 to the
+                request and response hashes this writ committed to.
+              </>
+            )}{' '}
+            {source ? (
+              <>
+                Retrieved from <b>{source}</b>, then rebuilt to that merkle root here before anything was read out of
+                it.
+              </>
+            ) : null}
+          </>
+        ) : (
+          <>
+            None of these re-derive, so there are no bytes here to check. A pointer is a claim by whoever published it
+            and nothing more — the proof itself was verified against the TEE signature at notarization, independently of
+            all of them.
+          </>
+        )}
+      </p>
+    </>
   )
 }
 
@@ -636,8 +724,6 @@ function Record({
           provider <AddrLink address={writ.provider} />
           <br />
           modelHash <span className="mono">{writ.modelHash}</span>
-          <br />
-          transcriptRoot <span className="mono">{writ.transcriptRoot}</span>
           <br />
           notarizedBy <AddrLink address={writ.notarizedBy} />
           <br />

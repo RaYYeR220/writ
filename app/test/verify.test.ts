@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { chainSummary, runProofChain, tamperCase, writId, routingWritId } from '@/lib/verify'
 import type { ProofRow } from '@/lib/verify'
-import { buildFixture, sourcesFor, STRANGER_KEY } from './helpers/fixture'
+import {
+  ARCHIVIST,
+  buildFixture,
+  FRONT_RUNNER,
+  GOOD_ROOT,
+  JUNK_ROOT,
+  sourcesFor,
+  STRANGER_KEY,
+} from './helpers/fixture'
 
 function row(rows: ProofRow[], key: ProofRow['key']): ProofRow {
   const found = rows.find((r) => r.key === key)
@@ -29,7 +37,7 @@ describe('the four checks', () => {
     expect(seen.at(-1)).toBe('pppp')
   })
 
-  it('fails the transcript row when the archived question has been edited', async () => {
+  it('does not accept a candidate whose archived question has been edited', async () => {
     const fixture = await buildFixture()
     const edited = {
       ...fixture.transcript,
@@ -40,22 +48,25 @@ describe('the four checks', () => {
     }
     expect(edited.request).not.toBe(fixture.transcript.request)
 
-    const { rows } = await runProofChain(fixture.writ.id, sourcesFor(fixture, { transcript: edited }))
+    const { rows, transcript } = await runProofChain(fixture.writ.id, sourcesFor(fixture, { transcript: edited }))
 
-    expect(row(rows, 'transcript').state).toBe('fail')
-    expect(row(rows, 'transcript').reason).toMatch(/question/)
+    // Not a pass, and not a fail: a pointer is a claim by whoever published it, so bytes that do
+    // not re-derive are a rejected candidate rather than evidence against the writ.
+    expect(row(rows, 'transcript').state).toBe('unavailable')
+    expect(row(rows, 'transcript').notes?.join(' ')).toMatch(/question/)
+    expect(transcript).toBeNull()
     // The record and the provider are untouched by a doctored transcript.
     expect(row(rows, 'record').state).toBe('pass')
     expect(row(rows, 'provider').state).toBe('pass')
   })
 
-  it('fails the transcript row when the archived answer has been edited', async () => {
+  it('does not accept a candidate whose archived answer has been edited', async () => {
     const fixture = await buildFixture()
     const edited = { ...fixture.transcript, response: fixture.transcript.response.replace('DENY:87', 'ALLOW:07') }
 
     const { rows } = await runProofChain(fixture.writ.id, sourcesFor(fixture, { transcript: edited }))
-    expect(row(rows, 'transcript').state).toBe('fail')
-    expect(row(rows, 'transcript').reason).toMatch(/answer/)
+    expect(row(rows, 'transcript').state).toBe('unavailable')
+    expect(row(rows, 'transcript').notes?.join(' ')).toMatch(/answer/)
   })
 
   it('fails the signature row when the signer is a key the registry never published', async () => {
@@ -108,6 +119,111 @@ describe('the four checks', () => {
   })
 })
 
+describe('the transcript is resolved by re-derivation, not by trusting a pointer', () => {
+  it('walks the candidates in order and takes the first that re-derives', async () => {
+    const fixture = await buildFixture()
+    const junk = { ...fixture.transcript, request: 'a transcript of some entirely different exchange' }
+
+    const { rows, transcript, acceptedRoot, candidates } = await runProofChain(
+      fixture.writ.id,
+      sourcesFor(fixture, {
+        // The front-runner got there first; the real archivist published second.
+        roots: [
+          { root: JUNK_ROOT, submitter: FRONT_RUNNER },
+          { root: GOOD_ROOT, submitter: ARCHIVIST },
+        ],
+        archive: { [JUNK_ROOT]: junk },
+      }),
+    )
+
+    expect(row(rows, 'transcript').state).toBe('pass')
+    expect(acceptedRoot).toBe(GOOD_ROOT)
+    expect(transcript?.request).toBe(fixture.transcript.request)
+    expect(candidates.map((c) => c.state)).toEqual(['rejected', 'accepted'])
+
+    // Being first bought the front-runner nothing, and the page says so rather than hiding it.
+    expect(row(rows, 'transcript').notes?.join(' ')).toMatch(/noise, not evidence/)
+    expect(row(rows, 'transcript').notes?.join(' ')).toContain(FRONT_RUNNER)
+    // And the whole chain still passes, which is the point: the junk root is not a wound.
+    expect(chainSummary(rows).state).toBe('pass')
+  })
+
+  it('stops at the first candidate that re-derives rather than fetching the rest', async () => {
+    const fixture = await buildFixture()
+    const { candidates } = await runProofChain(
+      fixture.writ.id,
+      sourcesFor(fixture, {
+        roots: [
+          { root: GOOD_ROOT, submitter: ARCHIVIST },
+          { root: JUNK_ROOT, submitter: FRONT_RUNNER },
+        ],
+      }),
+    )
+    expect(candidates.map((c) => c.state)).toEqual(['accepted', 'untried'])
+  })
+
+  it('reports unavailable — never a pass — when every candidate is junk', async () => {
+    const fixture = await buildFixture()
+    const junk = { ...fixture.transcript, request: 'not the question that was asked' }
+
+    const { rows, transcript, acceptedRoot } = await runProofChain(
+      fixture.writ.id,
+      sourcesFor(fixture, {
+        roots: [
+          { root: JUNK_ROOT, submitter: FRONT_RUNNER },
+          { root: GOOD_ROOT, submitter: FRONT_RUNNER },
+        ],
+        transcript: junk,
+        archive: { [JUNK_ROOT]: junk },
+      }),
+    )
+
+    expect(row(rows, 'transcript').state).toBe('unavailable')
+    expect(transcript).toBeNull()
+    expect(acceptedRoot).toBeNull()
+    // Both candidates are named, with who published each, so a reader can see whose claim failed.
+    expect(row(rows, 'transcript').notes).toHaveLength(2)
+    expect(row(rows, 'transcript').reason).toMatch(/says nothing about the proof itself/)
+    // The signature depends on those bytes, so it is unavailable too — not failed, not passed.
+    expect(row(rows, 'signature').state).toBe('unavailable')
+    expect(chainSummary(rows).state).toBe('unavailable')
+  })
+
+  it('says so plainly when nobody has published a pointer at all', async () => {
+    const fixture = await buildFixture()
+    const { rows } = await runProofChain(fixture.writ.id, sourcesFor(fixture, { roots: [] }))
+
+    expect(row(rows, 'transcript').state).toBe('unavailable')
+    expect(row(rows, 'transcript').reason).toMatch(/Nobody has published an archive pointer/)
+    expect(row(rows, 'transcript').reason).toMatch(/addTranscript/)
+  })
+
+  it('separates a pointer nobody can fetch from a pointer that leads to the wrong bytes', async () => {
+    const fixture = await buildFixture()
+    const { candidates } = await runProofChain(
+      fixture.writ.id,
+      sourcesFor(fixture, {
+        roots: [
+          { root: JUNK_ROOT, submitter: FRONT_RUNNER },
+          { root: GOOD_ROOT, submitter: ARCHIVIST },
+        ],
+        // Listed on chain, but 0G Storage has never heard of it.
+      }),
+    )
+    expect(candidates[0]!.state).toBe('unreachable')
+    expect(candidates[0]!.reason).toMatch(/File not found/)
+    expect(candidates[1]!.state).toBe('accepted')
+  })
+
+  it('cannot run the check at all when the candidate list itself will not read', async () => {
+    const fixture = await buildFixture()
+    const { rows } = await runProofChain(fixture.writ.id, sourcesFor(fixture, { roots: 'unreadable' }))
+
+    expect(row(rows, 'transcript').state).toBe('unavailable')
+    expect(row(rows, 'transcript').reason).toMatch(/could not be read from the registry/)
+  })
+})
+
 describe('unavailable is never mistaken for failed', () => {
   it('marks the transcript unavailable — not failed — when 0G Storage does not answer', async () => {
     const fixture = await buildFixture()
@@ -130,16 +246,6 @@ describe('unavailable is never mistaken for failed', () => {
     expect(row(rows, 'signature').state).toBe('unavailable')
     // Specifically: it does NOT fall back to the signer the transcript names for itself.
     expect(row(rows, 'signature').reason).toMatch(/self-declared/)
-  })
-
-  it('marks the transcript unavailable when the writ was notarized without archiving anything', async () => {
-    const fixture = await buildFixture()
-    const { rows } = await runProofChain(
-      fixture.writ.id,
-      sourcesFor(fixture, { writ: { transcriptRoot: '0x' + '00'.repeat(32) } }),
-    )
-    expect(row(rows, 'transcript').state).toBe('unavailable')
-    expect(row(rows, 'transcript').reason).toMatch(/empty transcript root/)
   })
 
   it('a failing check outranks a missing one in the summary', async () => {

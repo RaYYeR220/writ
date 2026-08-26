@@ -1268,6 +1268,53 @@ pre.code {
   color: var(--over);
 }
 
+/* ------------------------------------------------- transcript candidates */
+
+/*
+ * Every archive pointer published for a writ, in submission order.
+ *
+ * A rejected candidate is dimmed rather than marked in the refusal colour: it is somebody's
+ * failed claim, not a fault in the proof, and colouring it like a failure would say the
+ * opposite of what the page means.
+ */
+.roots {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  counter-reset: root;
+}
+
+.root {
+  counter-increment: root;
+  padding: 7px 0 7px 22px;
+  border-top: 1px solid var(--rule);
+  position: relative;
+}
+
+.root:first-child {
+  border-top: none;
+}
+
+.root::before {
+  content: counter(root);
+  position: absolute;
+  left: 0;
+  top: 8px;
+  font-family: var(--font-cond), 'Saira Condensed', Impact, sans-serif;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.root.rejected,
+.root.unreachable,
+.root.untried {
+  opacity: 0.55;
+}
+
+.root.accepted .hexline {
+  color: var(--ink);
+}
+
 .answer-big {
   font-family: var(--font-cond), 'Saira Condensed', Impact, sans-serif;
   font-weight: 700;

@@ -10,19 +10,36 @@
  * either direction is a failing test rather than a page that silently decodes nothing.
  */
 
+/**
+ * `WritRegistry`.
+ *
+ * The record carries no transcript root. The TEE never signed one, notarization is
+ * permissionless, and a single stored pointer would let whoever notarized first fix the archive
+ * pointer forever — so candidates live in `transcriptRoots`, anyone may append one, and a reader
+ * re-derives `reqHash`/`respHash` from the bytes a candidate points at instead of trusting any
+ * of them. `Notarized` carries none for the same reason; follow `TranscriptAdded` for pointers.
+ */
 export const WRIT_REGISTRY_ABI = [
   'function serving() view returns (address)',
   'function writCount() view returns (uint256)',
+  'function MAX_ROOTS_PER_SUBMITTER() view returns (uint256)',
   'function writId(address provider, bytes32 reqHash, bytes32 respHash) pure returns (bytes32)',
   'function routingWritId(address provider, bytes32 reqHash, bytes32 respHash, string providerType, string providerIdentity, bytes32 tlsFingerprint) pure returns (bytes32)',
   'function isNotarized(bytes32 id) view returns (bool)',
   'function isRoutingProof(bytes32 id) view returns (bool)',
-  'function getWrit(bytes32 id) view returns (tuple(address provider, bytes32 modelHash, bytes32 reqHash, bytes32 respHash, bytes32 transcriptRoot, uint64 notarizedAt, address notarizedBy))',
+  'function getWrit(bytes32 id) view returns (tuple(address provider, bytes32 modelHash, bytes32 reqHash, bytes32 respHash, uint64 notarizedAt, address notarizedBy))',
   'function getRoutingProof(bytes32 id) view returns (tuple(string providerType, string providerIdentity, bytes32 tlsFingerprint))',
+  'function transcriptRoots(bytes32 id) view returns (bytes32[])',
+  'function transcriptRootCount(bytes32 id) view returns (uint256)',
+  'function transcriptRootAt(bytes32 id, uint256 index) view returns (bytes32 root, address submitter)',
+  'function transcriptSubmitter(bytes32 id, bytes32 root) view returns (address)',
+  'function transcriptQuotaUsed(bytes32 id, address submitter) view returns (uint256)',
+  'function addTranscript(bytes32 id, bytes32 root)',
   'function notarize(address provider, bytes32 reqHash, bytes32 respHash, bytes signature, bytes32 transcriptRoot) returns (bytes32)',
   'function notarizeRoutingProof(address provider, bytes32 reqHash, bytes32 respHash, string providerType, string providerIdentity, bytes32 tlsFingerprint, bytes signature, bytes32 transcriptRoot) returns (bytes32)',
-  'event Notarized(bytes32 indexed id, address indexed provider, bytes32 indexed modelHash, string model, bytes32 reqHash, bytes32 respHash, bytes32 transcriptRoot, address notarizedBy)',
+  'event Notarized(bytes32 indexed id, address indexed provider, bytes32 indexed modelHash, string model, bytes32 reqHash, bytes32 respHash, address notarizedBy)',
   'event RoutingProofNotarized(bytes32 indexed id, address indexed provider, string providerType, string providerIdentity, bytes32 tlsFingerprint)',
+  'event TranscriptAdded(bytes32 indexed id, bytes32 indexed root, address indexed submitter)',
   'error NotTeeVerifiable(address provider, string verifiability)',
   'error SignerNotAcknowledged(address provider)',
   'error BadSignature(address recovered, address expected)',
@@ -32,6 +49,11 @@ export const WRIT_REGISTRY_ABI = [
   'error RoutingFieldEmpty()',
   'error RoutingFieldTooLong(uint256 length)',
   'error RoutingFieldHasDelimiter()',
+  'error ZeroServing()',
+  'error TranscriptRootEmpty()',
+  'error TranscriptAlreadyListed(bytes32 root)',
+  'error TranscriptQuotaUsed(address submitter, uint256 quota)',
+  'error TranscriptIndexOutOfRange(uint256 index, uint256 length)',
 ] as const
 
 export const TREASURY_GATE_ABI = [
@@ -52,7 +74,8 @@ export const TREASURY_GATE_ABI = [
   'function buildParams(address to, uint256 amount) view returns (bytes)',
   'function buildRequestBody(uint256 policyId, bytes params) view returns (bytes)',
   'function previewRequestBody(address to, uint256 amount) view returns (bytes)',
-  'function execute(address to, uint256 amount, bytes rawResponse, address provider, bytes signature, bytes32 transcriptRoot) returns (bool)',
+  'function execute(address to, uint256 amount, bytes rawResponse, address provider) returns (bool)',
+  'function executeRoutingProof(address to, uint256 amount, bytes rawResponse, address provider, tuple(string providerType, string providerIdentity, bytes32 tlsFingerprint) routing) returns (bool)',
   'function recover(address to)',
   'event TransferApproved(address indexed to, uint256 amount, uint8 risk, bytes32 indexed writId)',
   'event TransferRefused(address indexed to, uint256 amount, uint8 risk, uint8 refusedBy, bytes32 indexed writId)',
@@ -65,15 +88,27 @@ export const TREASURY_GATE_ABI = [
   'error ModelNotAllowed(bytes32 got, bytes32 want)',
   'error ProviderNotAllowed(address got, address want)',
   'error WritAlreadyConsumed(bytes32 id)',
+  'error WritNotNotarized(bytes32 id)',
   'error UnknownPolicy(uint256 policyId)',
   'error MarkerNotFound()',
   'error VerdictTooLong()',
   'error VerdictMalformed()',
 ] as const
 
+/**
+ * `PolicyGateFactory`.
+ *
+ * `GateSpec` names the model as a STRING, and the factory writes `{"model":"<modelName>",`
+ * itself while deriving `allowedModelHash` from that same string. The old shape took a prompt
+ * head and an unrelated model hash, so a caller could deploy a gate that asked about one model
+ * and accepted an answer from another with every check passing. Studio therefore takes a model
+ * name as its own field and asks `buildPromptHead` — on chain, pure — what the contract will
+ * actually build, rather than reproducing the concatenation here and hoping they agree.
+ */
 export const POLICY_GATE_FACTORY_ABI = [
   'function registry() view returns (address)',
-  'function deployGate(tuple(bytes promptHead, bytes promptTail, bytes32 allowedModelHash, address allowedProvider, uint8 maxRisk) p, address agent, address owner) returns (address)',
+  'function buildPromptHead(string modelName, bytes promptHead) pure returns (bytes)',
+  'function deployGate(tuple(string modelName, bytes promptHead, bytes promptTail, address allowedProvider, uint8 maxRisk) spec, address agent, address owner) returns (address)',
   'function gatesOf(address owner) view returns (address[])',
   'function gateCount() view returns (uint256)',
   'function allGates(uint256) view returns (address)',
@@ -82,6 +117,10 @@ export const POLICY_GATE_FACTORY_ABI = [
   'error ZeroAgent()',
   'error ZeroOwner()',
   'error RiskCeilingTooHigh(uint8 maxRisk)',
+  'error ModelNameEmpty()',
+  'error ModelNameTooLong(uint256 length)',
+  'error ModelNameHasIllegalByte(uint256 index)',
+  'error ModelKeyInPrompt()',
 ] as const
 
 /**

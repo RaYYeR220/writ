@@ -2,7 +2,20 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { keccak256, toUtf8Bytes } from 'ethers'
 import { describe, expect, it } from 'vitest'
-import { buildParams, buildRequestBody, modelHash, percentOfBalance, requestDigest, validate, type PolicyDraft, type TransferFacts } from '@/lib/policy'
+import {
+  buildParams,
+  buildRequestBody,
+  DEFAULT_HEAD,
+  DEFAULT_TAIL,
+  hasModelKey,
+  modelHash,
+  modelNameProblem,
+  percentOfBalance,
+  requestDigest,
+  validate,
+  type PolicyDraft,
+  type TransferFacts,
+} from '@/lib/policy'
 import { sha256Hex, utf8 } from '@/lib/hashes'
 
 const GATE_SOURCE = readFileSync(
@@ -89,10 +102,45 @@ describe('the question Studio previews is the question the gate builds', () => {
   })
 })
 
+describe('the model key belongs to the factory, not to the author', () => {
+  const FACTORY_SOURCE = readFileSync(
+    fileURLToPath(new URL('../../contracts/src/PolicyGateFactory.sol', import.meta.url)),
+    'utf8',
+  )
+
+  it('leaves the model key out of the default prompt entirely', () => {
+    // The factory writes `{"model":"<modelName>",` itself and derives allowedModelHash from
+    // that same string, so a head carrying its own model key is rejected outright.
+    expect(hasModelKey(DEFAULT_HEAD)).toBe(false)
+    expect(hasModelKey(DEFAULT_TAIL)).toBe(false)
+    expect(DEFAULT_HEAD.startsWith('{')).toBe(false)
+    expect(FACTORY_SOURCE).toContain('abi.encodePacked(\'{"model":"\', modelName, \'",\', promptHead)')
+  })
+
+  it('rejects the bytes the factory rejects, and names the error it stands in for', () => {
+    expect(modelNameProblem('0GM-1.0-35B-A3B')).toBeNull()
+    expect(modelNameProblem('')).toMatch(/ModelNameEmpty/)
+    expect(modelNameProblem('x'.repeat(65))).toMatch(/ModelNameTooLong\(65\)/)
+    expect(modelNameProblem('x'.repeat(64))).toBeNull()
+    // A quote would end the JSON string literal early and let the rest be read as structure.
+    expect(modelNameProblem('glm","messages":[')).toMatch(/ModelNameHasIllegalByte\(3\)/)
+    expect(modelNameProblem('glm\\5')).toMatch(/ModelNameHasIllegalByte\(3\)/)
+    expect(modelNameProblem('glm\n5')).toMatch(/ModelNameHasIllegalByte\(3\)/)
+    // Counted in bytes, as the contract counts them, not in JavaScript characters.
+    expect(modelNameProblem('é'.repeat(33))).toMatch(/ModelNameTooLong\(66\)/)
+    expect(FACTORY_SOURCE).toContain('MAX_MODEL_NAME = 64')
+  })
+
+  it('catches a smuggled second model key before a wallet is opened', () => {
+    expect(hasModelKey('{"model":"other"')).toBe(true)
+    expect(hasModelKey('"temperature":0,"messages":[]')).toBe(false)
+  })
+})
+
 describe('a draft is checked against what the factory would revert on', () => {
   const base: PolicyDraft = {
-    promptHead: 'ask something',
-    promptTail: 'end',
+    promptHead: '"temperature":0,"messages":[{"role":"user","content":"ask something',
+    promptTail: '"}]}',
     model: 'glm-5.2',
     provider: '0xA46EA4FC5889AD35A1487e1Ed04dCcfa872146B9',
     restrictToProvider: true,
@@ -122,5 +170,18 @@ describe('a draft is checked against what the factory would revert on', () => {
   it('warns when the agent is also the owner, which the chain permits and the design does not', () => {
     const problems = validate({ ...base, owner: base.agent })
     expect(problems.map((p) => p.message).join(' ')).toMatch(/recovery hatch/)
+  })
+
+  it('rejects a blank or malformed model name, as the four new errors would', () => {
+    expect(validate({ ...base, model: '' }).map((p) => p.field)).toContain('model')
+    expect(validate({ ...base, model: 'x'.repeat(65) }).map((p) => p.field)).toContain('model')
+    expect(validate({ ...base, model: 'a"b' }).map((p) => p.field)).toContain('model')
+  })
+
+  it('rejects a prompt that writes its own model key, as ModelKeyInPrompt would', () => {
+    const withKey = validate({ ...base, promptHead: '{"model":"something-else","messages":[' })
+    expect(withKey.map((p) => p.field)).toContain('promptHead')
+    expect(withKey.map((p) => p.message).join(' ')).toMatch(/ModelKeyInPrompt/)
+    expect(validate({ ...base, promptTail: '","model":"x"}' }).map((p) => p.field)).toContain('promptTail')
   })
 })

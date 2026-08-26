@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { Interface, hexlify, toUtf8Bytes } from 'ethers'
+import { Interface, hexlify, toUtf8Bytes, toUtf8String } from 'ethers'
 import { useEffect, useMemo, useState } from 'react'
 import { Gap } from '@/components/primitives'
 import { POLICY_GATE_FACTORY_ABI } from '@/lib/abi'
@@ -13,8 +13,11 @@ import {
   DEFAULT_TAIL,
   buildParams,
   buildRequestBody,
-  isAddress,
+  explainGateError,
   modelHash,
+  modelNameProblem,
+  hasModelKey,
+  validate,
   requestDigest,
   ZERO_ADDRESS,
   type PolicyDraft,
@@ -29,6 +32,15 @@ import {
  * deploying a gate actually does. You do not get to write the middle of the question. The
  * contract fills it in from its own state at execute time, and that is precisely why a caller
  * cannot understate a balance or claim a stranger is a familiar vendor.
+ *
+ * You do not get to write the *start* of it either, and that is newer. The model key is the
+ * factory's: it writes `{"model":"<modelName>",` and derives `allowedModelHash` from that same
+ * string, so a gate can no longer ask about one model and accept an answer from another. The
+ * preview therefore asks the factory's own `buildPromptHead` what it will build rather than
+ * concatenating the pieces here — an app that reproduced the splice could drift from the
+ * contract and show a digest for bytes nobody will ever pin. If that call cannot be made, this
+ * page says so and shows no bytes at all, because a plausible guess is exactly what it must
+ * never print.
  */
 
 const SAMPLE: TransferFacts = {
@@ -49,11 +61,24 @@ type Deploy =
   | { kind: 'done'; gate: string; txHash: string }
   | { kind: 'failed'; reason: string }
 
+/**
+ * The prompt head as the FACTORY builds it, never as this page would.
+ *
+ * `pending` while the call is in flight, `unavailable` with the reason when it cannot be made.
+ * There is deliberately no fourth state where the app falls back to splicing the strings itself:
+ * the whole claim of this screen is that the bytes on the right are the bytes that will be
+ * pinned, and a locally reconstructed head would make that claim without being able to keep it.
+ */
+type HeadPreview =
+  | { kind: 'pending' }
+  | { kind: 'ok'; head: string }
+  | { kind: 'unavailable'; reason: string }
+
 export function Studio() {
   const [draft, setDraft] = useState<PolicyDraft>({
+    model: '',
     promptHead: DEFAULT_HEAD,
     promptTail: DEFAULT_TAIL,
-    model: '',
     provider: '',
     restrictToProvider: true,
     maxRisk: 40,
@@ -63,6 +88,7 @@ export function Studio() {
 
   const [services, setServices] = useState<ServiceOption[] | null>(null)
   const [servicesError, setServicesError] = useState<string | null>(null)
+  const [head, setHead] = useState<HeadPreview>({ kind: 'pending' })
   const [digest, setDigest] = useState<string | null>(null)
   const [wallet, setWallet] = useState<{ address: string } | null>(null)
   const [deploy, setDeploy] = useState<Deploy>({ kind: 'idle' })
@@ -77,19 +103,65 @@ export function Studio() {
     }
   }, [])
 
-  const head = draft.model ? draft.promptHead.replace('MODEL', draft.model) : draft.promptHead
-  const body = useMemo(() => buildRequestBody(head, draft.promptTail, SAMPLE), [head, draft.promptTail])
+  const factoryReason = missingFactoryReason()
+
+  // Ask the factory what it will build. Debounced, because this runs on every keystroke, and
+  // guarded by `live` so a slow answer for an old draft can never overwrite a newer one.
+  useEffect(() => {
+    let live = true
+    setHead({ kind: 'pending' })
+
+    const localProblem = modelNameProblem(draft.model) ?? (hasModelKey(draft.promptHead) ? 'The head writes its own "model" key, which the factory rejects with ModelKeyInPrompt().' : null)
+
+    if (factoryReason) {
+      setHead({
+        kind: 'unavailable',
+        reason: `${factoryReason} The head is the factory's to build — it writes the model key itself — so without one there is no way to show you the bytes that would actually be pinned.`,
+      })
+      return
+    }
+    if (localProblem) {
+      setHead({ kind: 'unavailable', reason: localProblem })
+      return
+    }
+
+    const timer = setTimeout(() => {
+      void factoryContract()
+        .buildPromptHead(draft.model, toHex(draft.promptHead))
+        .then((hex) => live && setHead({ kind: 'ok', head: toUtf8String(hex) }))
+        .catch(
+          (e) =>
+            live &&
+            setHead({
+              kind: 'unavailable',
+              reason: `The factory at ${config.factory} did not answer buildPromptHead: ${explain(e)}`,
+            }),
+        )
+    }, 250)
+
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [draft.model, draft.promptHead, factoryReason])
+
+  const body = useMemo(
+    () => (head.kind === 'ok' ? buildRequestBody(head.head, draft.promptTail, SAMPLE) : null),
+    [head, draft.promptTail],
+  )
 
   // The digest is recomputed on every keystroke, from the bytes on the right, in this browser.
   useEffect(() => {
+    if (body === null) {
+      setDigest(null)
+      return
+    }
     let live = true
     void requestDigest(body).then((d) => live && setDigest(d))
     return () => {
       live = false
     }
   }, [body])
-
-  const factoryReason = missingFactoryReason()
 
   async function onDeploy() {
     setDeploy({ kind: 'signing' })
@@ -98,11 +170,13 @@ export function Studio() {
       setWallet({ address: connection.address })
 
       const factory = factoryContract(connection.signer)
+      // The spec carries the model NAME, not a hash. The factory writes the key and derives
+      // the hash from this one string, so there is no second argument that could disagree.
       const tx = await factory.deployGate(
         {
-          promptHead: toHex(head),
+          modelName: draft.model,
+          promptHead: toHex(draft.promptHead),
           promptTail: toHex(draft.promptTail),
-          allowedModelHash: modelHash(draft.model),
           allowedProvider: draft.restrictToProvider && draft.provider ? draft.provider : ZERO_ADDRESS,
           maxRisk: draft.maxRisk,
         },
@@ -125,12 +199,14 @@ export function Studio() {
       }
       setDeploy({ kind: 'done', gate: deployed, txHash: tx.hash })
     } catch (e) {
-      setDeploy({ kind: 'failed', reason: explain(e) })
+      setDeploy({ kind: 'failed', reason: explainGateError(explain(e)) })
     }
   }
 
   const problems = validateAll(draft)
-  const ready = problems.length === 0 && !factoryReason
+  // Deliberately gated on the preview having come back: if the factory would not tell us what
+  // it builds, this page has not shown the reader what they are about to pin.
+  const ready = problems.length === 0 && !factoryReason && head.kind === 'ok'
 
   return (
     <div className="wrap">
@@ -163,8 +239,30 @@ export function Studio() {
             />
 
             <div className="field" style={{ marginTop: 24 }}>
+              <label className="lab" htmlFor="model">
+                Model name — the one string the factory both asks for and enforces
+              </label>
+              <input
+                id="model"
+                type="text"
+                spellCheck={false}
+                placeholder="choose a provider above, or type a model name"
+                value={draft.model}
+                onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+              />
+              <p className="hint">
+                The factory writes <code>{'{"model":"'}</code>
+                {draft.model || '…'}
+                <code>{'",'}</code> itself and derives <code>allowedModelHash</code> from this same string. That is why
+                it is a field and not something you write into the prompt: the two used to arrive as unrelated
+                arguments, and a gate whose halves disagreed asked about one model and accepted an answer from another
+                with every check passing.
+              </p>
+            </div>
+
+            <div className="field">
               <label className="lab" htmlFor="head">
-                Prompt head — everything before the contract&rsquo;s own facts
+                Prompt head — everything after the model key, before the contract&rsquo;s own facts
               </label>
               <textarea
                 id="head"
@@ -173,7 +271,9 @@ export function Studio() {
                 onChange={(e) => setDraft({ ...draft, promptHead: e.target.value })}
               />
               <p className="hint">
-                <code>MODEL</code> is replaced with the model name the provider is registered under.
+                Continues from the key above, so it starts at <code>&quot;temperature&quot;:0,&quot;messages&quot;:[</code>{' '}
+                — no opening brace, and no <code>&quot;model&quot;</code> key of your own. The factory rejects one with{' '}
+                <code>ModelKeyInPrompt()</code>.
               </p>
             </div>
 
@@ -266,7 +366,27 @@ export function Studio() {
 
           <div className="side-pad r-pad">
             <h3 className="h5">The exact bytes, for one example transfer</h3>
-            <pre className="code">{body}</pre>
+            {head.kind === 'pending' ? (
+              <p className="dimmer" style={{ fontStyle: 'italic' }}>
+                Asking <span className="mono">PolicyGateFactory.buildPromptHead()</span> what it will build…
+              </p>
+            ) : head.kind === 'unavailable' ? (
+              <Gap title="No bytes to show you">
+                <p>{head.reason}</p>
+                <p>
+                  This page will not splice the model key on by itself and call the result the pinned bytes. The head is
+                  the factory&rsquo;s to build, so if the factory cannot be asked, the honest answer is nothing rather
+                  than a plausible guess with a sha256 under it.
+                </p>
+              </Gap>
+            ) : (
+              <pre className="code">{body}</pre>
+            )}
+            <p className="note" style={{ marginTop: 12 }}>
+              The start is not yours to write either: <b>the factory writes the model key</b> and hashes the same string
+              into <code>allowedModelHash</code>. The bytes above came back from{' '}
+              <span className="mono">buildPromptHead()</span> on chain, not from this page.
+            </p>
             <p className="note" style={{ marginTop: 12 }}>
               The middle section is not yours to write. <b>The contract builds it</b> from the recipient, the amount, its
               own nonce, its own balance and its own history, at the moment execute is called:
@@ -284,11 +404,18 @@ export function Studio() {
               What gets stored on chain
             </h3>
             <p className="hexline">
-              allowedModelHash = {draft.model ? modelHash(draft.model) : 'choose a provider'}
+              modelName = {draft.model || 'choose a provider'}
+              <br />
+              allowedModelHash = {draft.model ? modelHash(draft.model) : '—'}
               <br />
               allowedProvider = {draft.restrictToProvider && draft.provider ? draft.provider : ZERO_ADDRESS}
               <br />
               maxRisk = {draft.maxRisk}
+            </p>
+            <p className="note" style={{ marginTop: 8 }}>
+              <code>allowedModelHash</code> is not something you supply — the factory computes{' '}
+              <code>keccak256(bytes(modelName))</code> from the name above. It is shown here as the same keccak,
+              recomputed in this browser, so you can see the two halves of the gate are one string.
             </p>
             <p className="note" style={{ marginTop: 8 }}>
               The policy is copied into the gate at construction and is not governable afterwards. What the gate asks is
@@ -516,12 +643,12 @@ function topicToAddress(topic: string | undefined): string | null {
   return '0x' + topic.slice(26)
 }
 
+/**
+ * One list of problems, from `validate`, so the button and the page cannot disagree.
+ *
+ * It used to be a second copy of the same rules living here, which is exactly how a screen ends
+ * up enabling a deploy the chain will reject.
+ */
 function validateAll(draft: PolicyDraft): string[] {
-  const out: string[] = []
-  if (draft.promptHead.trim().length === 0) out.push('The prompt head is empty — the factory reverts with EmptyPrompt().')
-  if (!draft.model) out.push('Choose a usable TEE provider above; the policy names its model by hash.')
-  if (!isAddress(draft.agent)) out.push('The agent address is not a valid address.')
-  if (!isAddress(draft.owner)) out.push('The owner address is not a valid address.')
-  if (draft.maxRisk < 0 || draft.maxRisk > 100) out.push('The ceiling must be between 0 and 100.')
-  return out
+  return validate(draft).map((p) => p.message)
 }

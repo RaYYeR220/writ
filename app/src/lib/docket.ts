@@ -39,7 +39,8 @@ export type DocketEntry = {
   refusedBy: number | null
   model: string | null
   provider: string | null
-  transcriptRoot: string | null
+  /** Who put the proof on the record. Not who acted on it — that is `gate`. */
+  notarizedBy: string | null
   blockNumber: number
   txHash: string
   timestamp: number | null
@@ -69,7 +70,7 @@ type NotarizedRow = {
   id: string
   provider: string
   model: string
-  transcriptRoot: string
+  notarizedBy: string
   blockNumber: number
   txHash: string
 }
@@ -85,11 +86,16 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
     const logs = (await queryChunked(registry, registry.filters.Notarized(), range, signal)) as EventLog[]
     for (const log of logs) {
       if (!log.args) continue
+      // Positional, so the order is load-bearing:
+      // Notarized(id, provider, modelHash, model, reqHash, respHash, notarizedBy).
+      // `transcriptRoot` used to sit at index 6 and is gone — a root is a claim rather than
+      // part of the record, so it is published separately through `TranscriptAdded` and the
+      // docket does not repeat one. Index 6 is `notarizedBy` now.
       notarized.set(String(log.args[0]).toLowerCase(), {
         id: String(log.args[0]),
         provider: String(log.args[1]),
         model: String(log.args[3]),
-        transcriptRoot: String(log.args[6]),
+        notarizedBy: String(log.args[6]),
         blockNumber: log.blockNumber,
         txHash: log.transactionHash,
       })
@@ -148,7 +154,7 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
           refusedBy: null,
           model: meta?.model ?? null,
           provider: meta?.provider ?? null,
-          transcriptRoot: meta?.transcriptRoot ?? null,
+          notarizedBy: meta?.notarizedBy ?? null,
           blockNumber: log.blockNumber,
           txHash: log.transactionHash,
           timestamp: null,
@@ -174,7 +180,7 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
           refusedBy: Number(log.args[3]),
           model: meta?.model ?? null,
           provider: meta?.provider ?? null,
-          transcriptRoot: meta?.transcriptRoot ?? null,
+          notarizedBy: meta?.notarizedBy ?? null,
           blockNumber: log.blockNumber,
           txHash: log.transactionHash,
           timestamp: null,
@@ -201,7 +207,7 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
       refusedBy: null,
       model: row.model,
       provider: row.provider,
-      transcriptRoot: row.transcriptRoot,
+      notarizedBy: row.notarizedBy,
       blockNumber: row.blockNumber,
       txHash: row.txHash,
       timestamp: null,

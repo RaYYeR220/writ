@@ -31,18 +31,45 @@ export type ProofRow = {
   ms?: number
 }
 
-/** The on-chain record, exactly as `WritRegistry.getWrit` returns it. */
+/**
+ * The on-chain record, exactly as `WritRegistry.getWrit` returns it.
+ *
+ * Note what is NOT here: an archive pointer. The TEE signs the request and response hashes and
+ * never a pointer to an archive, so a root is a claim by whoever published it rather than part
+ * of the record. Candidates live in `transcriptRoots` and are resolved by re-derivation.
+ */
 export type WritRecord = {
   id: string
   provider: string
   modelHash: string
   reqHash: string
   respHash: string
-  transcriptRoot: string
   notarizedAt: number
   notarizedBy: string
   isRouting: boolean
   routing?: RoutingFields
+}
+
+/** One published archive pointer, and the address whose claim it is. */
+export type TranscriptCandidate = {
+  root: string
+  /** `WritRegistry` attributes every root to its submitter. Attribution, not endorsement. */
+  submitter: string
+}
+
+/**
+ * What happened when a candidate was tried.
+ *
+ * `rejected` is not evidence against the writ. Anyone may publish a root for any writ, so a
+ * candidate that does not re-derive says something about whoever published it and nothing at
+ * all about the proof — which was verified by signature recovery, independently of every
+ * pointer. That is why a bad candidate never fails the transcript row.
+ */
+export type CandidateOutcome = TranscriptCandidate & {
+  index: number
+  /** `untried` means an earlier candidate already re-derived, so this one was never fetched. */
+  state: 'accepted' | 'rejected' | 'unreachable' | 'untried'
+  reason?: string
 }
 
 /** A 0G `InferenceServing` entry, as the registry reports it right now. */
@@ -63,6 +90,10 @@ export type ProofChain = {
   service: ServiceRecord | null
   transcript: Transcript | null
   transcriptSource: string | null
+  /** Every candidate root that was tried, in submission order, and how each one fared. */
+  candidates: CandidateOutcome[]
+  /** The candidate whose bytes actually re-derived, if any did. */
+  acceptedRoot: string | null
   /** The signer `ecrecover` landed on, if the arithmetic could be done at all. */
   recovered: string | null
 }
@@ -86,7 +117,8 @@ export function emptyRows(): ProofRow[] {
     {
       key: 'transcript',
       name: 'The transcript',
-      claim: 'the archived bytes are the ones this writ committed to, question and answer both',
+      claim:
+        'one of the archive pointers published for this writ leads to bytes that re-derive it, question and answer both',
       state: 'idle',
       evidence: [],
     },
@@ -106,11 +138,118 @@ export type VerifySources = {
   getWrit(id: string): Promise<WritRecord>
   /** Reads 0G's live provider registry. Throws if it cannot answer. */
   getService(provider: string): Promise<ServiceRecord>
+  /** Every candidate archive pointer published for this writ, in submission order. */
+  listTranscriptRoots(id: string): Promise<TranscriptCandidate[]>
   /** Returns the archived bytes, already checked against the merkle root. Throws with a reason. */
   getTranscript(root: string): Promise<{ bytes: Uint8Array; source: string }>
 }
 
 export type ProgressFn = (rows: ProofRow[]) => void
+
+export type ResolvedTranscript = {
+  transcript: Transcript | null
+  root: string | null
+  source: string | null
+  byteLength: number
+  reqDigest: string
+  respDigest: string
+  candidates: CandidateOutcome[]
+}
+
+/**
+ * Walks the published archive pointers and takes the first whose bytes actually re-derive.
+ *
+ * This is the whole reason `Writ` no longer carries a root. Notarization is permissionless, so
+ * whoever learned a chat id could once notarize first with a junk root and fix the archive
+ * pointer forever. Now anyone may append a candidate, and a reader settles the question by
+ * arithmetic rather than by trusting the first publisher: fetch the bytes a candidate points
+ * at, sha256 the request and the response, and accept it only if both match what the writ
+ * committed to on chain. A junk root is then self-evidently junk, and front-running becomes
+ * noise.
+ *
+ * Every candidate is tried in submission order and the first that re-derives wins. There is no
+ * fallback: if none of them re-derive, this returns no transcript and the reasons why, and the
+ * caller reports that as `unavailable`.
+ */
+export async function resolveTranscript(
+  writ: Pick<WritRecord, 'reqHash' | 'respHash'>,
+  candidates: CandidateOutcome[],
+  sources: Pick<VerifySources, 'getTranscript'>,
+): Promise<ResolvedTranscript> {
+  const tried: CandidateOutcome[] = []
+  const empty = {
+    transcript: null,
+    root: null,
+    source: null,
+    byteLength: 0,
+    reqDigest: '',
+    respDigest: '',
+  }
+
+  for (const candidate of candidates) {
+    if (isZeroRoot(candidate.root)) {
+      // The registry never lists the zero root, so one here means a source that is not the
+      // registry. It is the absence of a pointer, not a pointer, so it cannot be followed.
+      tried.push({ ...candidate, state: 'unreachable', reason: 'the zero root is not a pointer to anything' })
+      continue
+    }
+
+    let fetched: { bytes: Uint8Array; source: string }
+    try {
+      fetched = await sources.getTranscript(candidate.root)
+    } catch (e) {
+      tried.push({ ...candidate, state: 'unreachable', reason: why(e) })
+      continue
+    }
+
+    let parsed: Transcript
+    try {
+      parsed = parseTranscript(fetched.bytes)
+    } catch (e) {
+      tried.push({ ...candidate, state: 'rejected', reason: why(e) })
+      continue
+    }
+
+    const [reqDigest, respDigest] = await Promise.all([
+      sha256Hex(utf8(parsed.request)),
+      sha256Hex(utf8(parsed.response)),
+    ])
+    const reqOk = '0x' + reqDigest === writ.reqHash.toLowerCase()
+    const respOk = '0x' + respDigest === writ.respHash.toLowerCase()
+
+    if (!reqOk || !respOk) {
+      const broken = !reqOk && !respOk ? 'question and answer' : !reqOk ? 'question' : 'answer'
+      tried.push({
+        ...candidate,
+        state: 'rejected',
+        reason: `the archived ${broken} does not hash to what this writ committed to on chain`,
+      })
+      continue
+    }
+
+    tried.push({ ...candidate, state: 'accepted' })
+    return {
+      transcript: parsed,
+      root: candidate.root,
+      source: fetched.source,
+      byteLength: fetched.bytes.length,
+      reqDigest,
+      respDigest,
+      // Candidates after the accepted one are never fetched: the first that re-derives is the
+      // answer, and the rest would cost a reader bandwidth to learn nothing.
+      candidates: [
+        ...tried,
+        ...candidates.slice(tried.length).map((c) => ({
+          ...c,
+          state: 'untried' as const,
+          reason: 'not fetched — an earlier candidate already re-derived',
+        })),
+      ],
+    }
+  }
+
+  return { ...empty, candidates: tried }
+}
 
 function since(t0: number): number {
   return Math.max(1, Math.round(performance.now() - t0))
@@ -215,44 +354,64 @@ export async function runProofChain(
 
   let transcript: Transcript | null = null
   let transcriptSource: string | null = null
+  let acceptedRoot: string | null = null
+  let candidates: CandidateOutcome[] = []
 
-  if (isZeroRoot(writ.transcriptRoot)) {
+  try {
+    candidates = (await sources.listTranscriptRoots(id)).map((c, index) => ({
+      ...c,
+      index,
+      state: 'rejected' as const,
+    }))
+  } catch (e) {
     r3.ms = since(t0)
     r3.state = 'unavailable'
-    r3.reason =
-      'This writ carries an empty transcript root. The signature was notarized without archiving what was said, so there are no bytes to check.'
-  } else {
-    try {
-      const fetched = await sources.getTranscript(writ.transcriptRoot)
-      transcriptSource = fetched.source
-      transcript = parseTranscript(fetched.bytes)
+    r3.reason = `The list of archive pointers for this writ could not be read from the registry: ${why(e)}`
+  }
 
-      const [reqDigest, respDigest] = await Promise.all([
-        sha256Hex(utf8(transcript.request)),
-        sha256Hex(utf8(transcript.response)),
-      ])
-      r3.ms = since(t0)
+  if (r3.state === 'running') {
+    const resolved = await resolveTranscript(writ, candidates, sources)
+    transcript = resolved.transcript
+    transcriptSource = resolved.source
+    acceptedRoot = resolved.root
+    candidates = resolved.candidates
+    r3.ms = since(t0)
 
-      const reqOk = '0x' + reqDigest === writ.reqHash.toLowerCase()
-      const respOk = '0x' + respDigest === writ.respHash.toLowerCase()
-
-      r3.evidence = [
-        `${fetched.bytes.length} bytes, merkle root rebuilt from ${fetched.source}`,
-        `sha256(question) ${reqDigest}`,
-        `sha256(answer)   ${respDigest}`,
-      ]
-
-      if (!reqOk || !respOk) {
-        r3.state = 'fail'
-        const broken = !reqOk && !respOk ? 'question and answer' : !reqOk ? 'question' : 'answer'
-        r3.reason = `The archived ${broken} does not hash to what this writ committed to on chain. These bytes are not the ones that were signed.`
-      } else {
-        r3.state = 'pass'
-      }
-    } catch (e) {
-      r3.ms = since(t0)
+    if (candidates.length === 0) {
       r3.state = 'unavailable'
-      r3.reason = why(e)
+      r3.reason =
+        'Nobody has published an archive pointer for this writ. The proof was verified from the signature alone, so it stands — but without archived bytes there is nothing here to re-derive it from. Anyone can publish one with addTranscript.'
+    } else if (transcript && acceptedRoot) {
+      const accepted = candidates.find((c) => c.state === 'accepted')!
+      r3.state = 'pass'
+      r3.evidence = [
+        `candidate ${accepted.index + 1} of ${candidates.length} re-derives: ${acceptedRoot}`,
+        `published by ${accepted.submitter}`,
+        `${resolved.byteLength} bytes, merkle root rebuilt from ${resolved.source}`,
+        `sha256(question) ${resolved.reqDigest}`,
+        `sha256(answer)   ${resolved.respDigest}`,
+      ]
+      const discarded = candidates.filter((c) => c.state === 'rejected' || c.state === 'unreachable')
+      if (discarded.length > 0) {
+        r3.notes = [
+          `${discarded.length === 1 ? 'One earlier pointer was' : `${discarded.length} earlier pointers were`} published for this writ and did not re-derive. That is noise, not evidence: anyone may publish a root for any writ, and this proof was verified by signature recovery independently of all of them.`,
+          ...discarded.map((c) => `candidate ${c.index + 1} · ${c.root} · published by ${c.submitter} · ${c.reason}`),
+        ]
+      }
+    } else {
+      // Never a pass, and never a fail either. A pointer nobody can re-derive is a claim by
+      // whoever published it — treating it as evidence would let a front-runner make a sound
+      // writ read as broken by publishing junk before the real archivist got there.
+      const only = candidates.length === 1 ? candidates[0]! : null
+      r3.state = 'unavailable'
+      r3.reason = only
+        ? `The one archive pointer published for this writ, by ${only.submitter}, could not be used: ${only.reason}. ` +
+          'That says nothing about the proof itself, which was verified against the TEE signature when it was notarized. Anyone can publish a better pointer with addTranscript.'
+        : `None of the ${candidates.length} archive pointers published for this writ lead to bytes that re-derive it, so there is nothing here to check the signature against. ` +
+          'That says nothing about the proof itself, which was verified against the TEE signature when it was notarized. Anyone can publish a better pointer with addTranscript.'
+      r3.notes = candidates.map(
+        (c) => `candidate ${c.index + 1} · ${c.root} · published by ${c.submitter} · ${c.reason}`,
+      )
     }
   }
   emit()
@@ -307,7 +466,7 @@ export async function runProofChain(
   }
   emit()
 
-  return { rows, writ, service, transcript, transcriptSource, recovered }
+  return { rows, writ, service, transcript, transcriptSource, candidates, acceptedRoot, recovered }
 }
 
 /** `WritRegistry.writId`, recomputed locally. */

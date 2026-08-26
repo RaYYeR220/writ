@@ -71,9 +71,19 @@ export function modelHash(model: string): string {
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 export type PolicyDraft = {
+  /**
+   * The model name, as its own field.
+   *
+   * The factory writes `{"model":"<model>",` itself and derives `allowedModelHash` from this
+   * same string, so the model a gate's question names and the model its writs are checked
+   * against cannot disagree. It used to be possible to pass a prompt head naming one model and
+   * an unrelated hash, producing a gate that asked about one and accepted an answer from
+   * another with every check passing.
+   */
+  model: string
+  /** Continues from the model key the factory writes: `"temperature":0,"messages":[…`. */
   promptHead: string
   promptTail: string
-  model: string
   provider: string
   /** Empty means any acknowledged TeeML provider, which is what `address(0)` means on chain. */
   restrictToProvider: boolean
@@ -83,6 +93,45 @@ export type PolicyDraft = {
 }
 
 export type DraftProblem = { field: keyof PolicyDraft; message: string }
+
+/** `PolicyGateFactory.MAX_MODEL_NAME`. */
+export const MAX_MODEL_NAME = 64
+
+/**
+ * `PolicyGateFactory._requireModelName`, byte for byte.
+ *
+ * The name is spliced into a JSON string literal, so anything that could end that literal early
+ * would let the rest be read as structure — a caller could rewrite the messages array from
+ * inside what looks like a model name. The contract rejects `"` and `\` and every control byte;
+ * so does this, before a wallet is ever opened.
+ */
+export function modelNameProblem(model: string): string | null {
+  const raw = new TextEncoder().encode(model)
+  if (raw.length === 0) {
+    return 'Choose a provider above, or type the model name — the factory reverts with ModelNameEmpty().'
+  }
+  if (raw.length > MAX_MODEL_NAME) {
+    return `The model name is ${raw.length} bytes; the factory reverts with ModelNameTooLong(${raw.length}) above ${MAX_MODEL_NAME}.`
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!
+    if (c === 0x22 || c === 0x5c || c < 0x20) {
+      return `Byte ${i} of the model name is one the factory rejects with ModelNameHasIllegalByte(${i}) — a quote, a backslash or a control byte would end the JSON string early and let the rest be read as structure.`
+    }
+  }
+  return null
+}
+
+/**
+ * `PolicyGateFactory._requireNoModelKey`, byte for byte.
+ *
+ * JSON leaves duplicate keys to the parser, so a second `"model"` could win and the provider
+ * would run a model the gate never named. The factory writes the key itself, so the caller's
+ * bytes may not carry one.
+ */
+export function hasModelKey(prompt: string): boolean {
+  return prompt.includes('"model"')
+}
 
 /**
  * Everything the factory would revert on, checked before a wallet is ever opened.
@@ -116,10 +165,56 @@ export function validate(draft: PolicyDraft): DraftProblem[] {
         'The chain permits this, but it defeats the point: the owner holds the 30-day recovery hatch, and an agent that also owns it can stop asking for verdicts and sweep the treasury itself.',
     })
   }
-  if (draft.model.trim().length === 0) {
-    problems.push({ field: 'model', message: 'Choose a provider above — the policy names the model by hash and cannot be left blank.' })
+  const modelProblem = modelNameProblem(draft.model)
+  if (modelProblem) problems.push({ field: 'model', message: modelProblem })
+
+  if (hasModelKey(draft.promptHead)) {
+    problems.push({
+      field: 'promptHead',
+      message:
+        'The head carries a "model" key of its own — the factory writes that key itself and reverts with ModelKeyInPrompt(). Start the head from "temperature":0,"messages":[… instead.',
+    })
+  }
+  if (hasModelKey(draft.promptTail)) {
+    problems.push({
+      field: 'promptTail',
+      message: 'The tail carries a "model" key — the factory reverts with ModelKeyInPrompt().',
+    })
   }
   return problems
+}
+
+/**
+ * The factory's custom errors, in the app's voice.
+ *
+ * `explain` already decodes a revert into `ModelKeyInPrompt()` because the ABI declares it.
+ * This turns that into a sentence saying what to do about it — the name and its arguments are
+ * kept in the text so a reader can still match what the page says to what the chain said.
+ */
+export function explainGateError(decoded: string): string {
+  const name = /^(\w+)\(/.exec(decoded)?.[1]
+  const arg = /^\w+\(([^,)]*)/.exec(decoded)?.[1] ?? ''
+
+  switch (name) {
+    case 'ModelNameEmpty':
+      return `${decoded} — the gate needs a model name. It is the one string the factory both writes into the question and hashes into allowedModelHash, so it cannot be blank.`
+    case 'ModelNameTooLong':
+      return `${decoded} — the model name is ${arg} bytes and the factory allows ${MAX_MODEL_NAME}.`
+    case 'ModelNameHasIllegalByte':
+      return `${decoded} — byte ${arg} of the model name is a quote, a backslash or a control byte. The name is spliced into a JSON string literal, so a byte that could end that literal early would let the rest be read as structure.`
+    case 'ModelKeyInPrompt':
+      return `${decoded} — your prompt writes its own "model" key. The factory writes that key itself from the model name, and a duplicate could win in the provider's parser, so the gate would name one model and the provider would run another.`
+    case 'EmptyPrompt':
+      return `${decoded} — the prompt head cannot be empty.`
+    case 'RiskCeilingTooHigh':
+      return `${decoded} — a ceiling above 100 would wave through every verdict the grammar can express.`
+    case 'ZeroAgent':
+      return `${decoded} — the agent cannot be the zero address; nobody could ever call the gate.`
+    case 'ZeroOwner':
+      return `${decoded} — the owner cannot be the zero address; the recovery hatch would be unreachable.`
+    default:
+      return decoded
+  }
 }
 
 export function isAddress(value: string): boolean {
@@ -131,7 +226,12 @@ export function isAddress(value: string): boolean {
   }
 }
 
-/** The default policy, written in the voice the contract needs: one line out, strict grammar. */
-export const DEFAULT_HEAD = `{"model":"MODEL","messages":[{"role":"system","content":"You are the risk officer for an autonomous treasury on 0G. Judge the transfer described below on its own facts. Answer on ONE line, exactly: ALLOW:<risk 00-99> or DENY:<risk 00-99>. No other text."},{"role":"user","content":"Transfer request. `
+/**
+ * The default policy, written in the voice the contract needs: one line out, strict grammar.
+ *
+ * It starts *after* the model key. The factory prepends `{"model":"<modelName>",` and this
+ * continues from there, which is why there is an opening brace nowhere in sight.
+ */
+export const DEFAULT_HEAD = `"temperature":0,"max_tokens":16,"messages":[{"role":"system","content":"You are the risk officer for an autonomous treasury on 0G. Judge the transfer described below on its own facts. Answer on ONE line, exactly: ALLOW:<risk 00-99> or DENY:<risk 00-99>. No other text."},{"role":"user","content":"Transfer request. `
 
-export const DEFAULT_TAIL = `"}],"temperature":0,"max_tokens":16}`
+export const DEFAULT_TAIL = `"}]}`
