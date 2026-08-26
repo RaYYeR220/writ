@@ -10,8 +10,10 @@ import { concat, keccak256 } from 'ethers'
  * source out of the trust path, so it has to run here rather than on a server.
  *
  * Ported from `@0gfoundation/0g-storage-ts-sdk` (`AbstractFile.merkleTree`, `MerkleTree.build`,
- * `file/utils.ts`), which is the definition the uploader used. `test/zg-merkle.test.ts` checks
- * this port against that package directly, so a change upstream shows up as a failing test.
+ * `file/utils.ts`), which is the definition the uploader used. `test/zg-merkle.test.ts` pins this
+ * port against 12 vectors captured from that package and committed as constants — so a regression
+ * in this file fails the test, but a change upstream in the SDK would not, because nothing here
+ * re-reads it. Re-capture the vectors when the SDK's version moves.
  */
 
 const CHUNK_SIZE = 256

@@ -401,7 +401,7 @@ entrypoint imports it before any other module in the graph is evaluated. `consol
 ## Development
 
 ```bash
-pnpm test        # 138 tests, no chain, no funds, no provider
+pnpm test        # 145 tests, no chain, no funds, no provider
 pnpm typecheck
 pnpm build
 ```

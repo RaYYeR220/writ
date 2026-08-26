@@ -54,9 +54,9 @@ stubs `fetch`. The correct statement is "never run", not "only reachable from `-
 ## 1. Contract unit tests — `writ/contracts`, 213 tests
 
 Run as part of `forge test`, which executes all **217** contract tests (213 here plus the 4 fork
-tests in §2) and currently reports **214 passed, 3 failed**. The three failures are stale
-`assertLt(used, 200_000)` ceilings in the gas-measurement tests, not behaviour — see `CLAIMS.md`
-1.9a. Build with `forge build --force` first; a stale artifact silently skips suites.
+tests in §2) and reports **217 passed, 0 failed**. `forge test --gas-report` reports the same; it
+did not always, and why it did not is worth reading in `CLAIMS.md` 1.9a before you re-measure any
+gas figure. Build with `forge build --force` first; a stale artifact silently skips suites.
 
 These 213 need no network and no funds.
 
@@ -141,7 +141,7 @@ here.**
 | Chain reads | **SUBSTITUTED in tests** — `app/src/lib/verify.ts` takes an injected `VerifySources`, and `app/src/lib/sources.ts::chainSources` (the real ethers implementation) is not exercised by any test |
 | 0G Storage download | **SUBSTITUTED in tests** — `vi.stubGlobal('fetch', …)`. The shipping `app/src/lib/storage.ts` does a real `GET {indexer}/file?root=…` and content-addresses the result; that path has never run against the live indexer |
 | The merkle root algorithm | **PORTED, not imported** — `app/src/lib/zg-merkle.ts` reimplements `AbstractFile.merkleTree` / `MerkleTree.build` for the browser rather than shipping the storage SDK. `app/package.json` does not depend on that SDK |
-| The 12 merkle vectors | **FROZEN CONSTANTS** — `app/test/zg-merkle.test.ts` compares against committed hex, **not** against the real package. An upstream change would not fail this suite. `zg-merkle.ts`'s own header currently claims otherwise and is wrong; see `CLAIMS.md` 7.5 |
+| The 8 merkle vectors | **FROZEN CONSTANTS** — `app/test/zg-merkle.test.ts` compares against committed hex, **not** against the real package. A regression in our port fails this suite; an upstream change in the SDK would not. `zg-merkle.ts`'s header used to claim otherwise and now says what the test does; see `CLAIMS.md` 7.5 |
 | ABI fidelity | **REAL** — `app/test/abi.test.ts` compiles the Foundry project and compares selectors, event topic hashes **and return-tuple shapes**, including an explicit assertion that `getWrit` no longer carries a `transcriptRoot` |
 | Signature recovery, hashing | **REAL** — ethers in the browser, against the on-chain `teeSignerAddress` |
 

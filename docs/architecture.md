@@ -1342,7 +1342,9 @@ longer verifies signatures.
 ## 8. Measured gas
 
 **Every figure in this section was regenerated on 2026-08-26 against the current contracts with
-`forge build --force && forge test --gas-report`. Two earlier sets of numbers have been superseded
+`forge build --force`, then `forge test` and `forge test --gas-report`. Both runs are needed: they
+do not print the same `gasleft()` numbers, for the reason at the end of this section. Two earlier
+sets of numbers have been superseded
 — once when notarization left the settle path, and once when the transcript root became an
 append-only list. Do not carry a gas figure over from an older revision of this document.**
 
@@ -1351,19 +1353,24 @@ Unless a row says otherwise, the `InferenceServing` read goes to
 much larger struct and costs more to read.
 
 The `test_measures*` figures are `gasleft()` deltas taken across an external call from the test
-frame, so each is slightly above the same function's row in `--gas-report`, which excludes the
-caller's own overhead. Both are given where they differ.
+frame, so each sits a little above the same function's row in the `--gas-report` table below, which
+excludes the caller's own overhead. They are also **mode-dependent**: `--gas-report` charges its own
+instrumentation inside the bracketed window, so the same call reads higher under that flag. Both
+readings are given. **Read the middle column as the cost** — it is what a caller pays.
 
-| Operation | Gas | Where it is measured |
-|---|---:|---|
-| `WritLib.recoverSigner` (Format A, through an external harness call) | **47,209** | `WritLib.t.sol::test_measuresVerificationGas` |
-| `WritLib.recoverRoutingProofSigner` (Format B) | **69,337** | `WritLib.t.sol::test_measuresRoutingProofVerificationGas` |
-| `WritRegistry.notarize`, cold, **with** a transcript root | **339,161** | `WritRegistry.t.sol::test_measuresNotarizeGas` |
-| `WritRegistry.notarizeRoutingProof`, cold, with a root | **438,152** | `WritRegistry.t.sol::test_measuresRoutingNotarizeGas` |
-| `WritRegistry.addTranscript`, one further candidate | **81,808** | `WritRegistry.t.sol::test_measuresAddTranscriptGas` |
-| `AgentTreasury.execute`, approved — **reads a writ, transfers; notarizes nothing** | **267,579** | `AgentTreasury.t.sol::test_measuresExecuteGas` |
-| `AgentTreasury.execute`, refused — reads a writ, records the refusal | **212,583** | `AgentTreasury.t.sol::test_measuresRefusalGas` |
-| `AgentTreasury.executeRoutingProof`, approved | **273,472** | `AgentTreasury.t.sol::test_measuresRoutingProofExecuteGas` |
+| Operation | `forge test` | `--gas-report` | Where it is measured |
+|---|---:|---:|---|
+| `WritLib.recoverSigner` (Format A, through an external harness call) | **47,209** | 47,209 | `WritLib.t.sol::test_measuresVerificationGas` |
+| `WritLib.recoverRoutingProofSigner` (Format B) | **69,337** | 69,337 | `WritLib.t.sol::test_measuresRoutingProofVerificationGas` |
+| `WritRegistry.notarize`, cold, **with** a transcript root | **315,325** | 339,161 | `WritRegistry.t.sol::test_measuresNotarizeGas` |
+| `WritRegistry.notarizeRoutingProof`, cold, with a root | **412,712** | 438,152 | `WritRegistry.t.sol::test_measuresRoutingNotarizeGas` |
+| `WritRegistry.addTranscript`, one further candidate | **48,480** | 81,808 | `WritRegistry.t.sol::test_measuresAddTranscriptGas` |
+| `AgentTreasury.execute`, approved — **reads a writ, transfers; notarizes nothing** | **174,591** | 267,579 | `AgentTreasury.t.sol::test_measuresExecuteGas` |
+| `AgentTreasury.execute`, refused — reads a writ, records the refusal | **119,607** | 212,583 | `AgentTreasury.t.sol::test_measuresRefusalGas` |
+| `AgentTreasury.executeRoutingProof`, approved | **178,764** | 273,472 | `AgentTreasury.t.sol::test_measuresRoutingProofExecuteGas` |
+
+The two pure-verification rows are identical because they touch no storage; the gap widens with the
+number of state writes in the window.
 
 From `--gas-report` (function-body cost, all calls in the suite):
 
@@ -1411,12 +1418,18 @@ accordingly; do not treat the mock numbers as the mainnet cost.
 The earlier day-0 figure of 74,940 gas for a full verification came from a throwaway spike harness
 with a different call shape and is **superseded** by the 47,209 above.
 
-**Three tests in this set currently fail, and it is a stale assertion rather than a regression.**
-`test_measuresExecuteGas`, `test_measuresRefusalGas` and `test_measuresRoutingProofExecuteGas` each
-close with `assertLt(used, 200_000)`. The measured values above are 267,579 / 212,583 / 273,472, so
-all three assertions fail while printing the correct number. `forge test` therefore reports **214
-passed, 3 failed of 217**. The ceiling has not been re-baselined against the current settle path;
-the figures in this table are what the run actually measured.
+**A note on a trap this section walked into.** `test_measuresExecuteGas`, `test_measuresRefusalGas`
+and `test_measuresRoutingProofExecuteGas` used to close with `assertLt(used, 200_000)`. Under a
+plain `forge test` they measured 174,591 / 119,607 / 178,764 and passed; under
+`forge test --gas-report` the same three calls measured 267,579 / 212,583 / 273,472 and failed —
+which was the awkward part, because this section tells you to run `--gas-report`. The ceilings were
+raised to 300,000 / 250,000 / 320,000 so both modes clear them, and the tests now carry a comment
+saying they are regression guards rather than pins. Both `forge test` and `forge test --gas-report`
+report **217 passed, 0 failed**.
+
+The general point is the one worth keeping: a `gasleft()` delta is not a property of the contract
+alone. Whatever runs inside the bracketed window is charged to it, and `--gas-report` puts its own
+instrumentation there. Never quote a `gasleft()` figure without the mode that produced it.
 
 ---
 

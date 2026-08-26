@@ -123,14 +123,15 @@ writ page says so where a reader will see it.
 pnpm test
 ```
 
-92 tests, in seven files:
+105 tests, in seven files:
 
 - `verify.test.ts` — the four checks over real sha256 and real EIP-191 signatures. A sound proof
   passes; an edited question fails on hashes; an edited answer fails on hashes; a signature from a
   key the registry never published fails on the signer; a doctored transcript cannot vouch for its
   own signed text; unavailable never becomes pass.
-- `zg-merkle.test.ts` — the 0G Storage merkle port, against vectors from the storage SDK itself,
-  across every branch of the padding rule.
+- `zg-merkle.test.ts` — the 0G Storage merkle port, against eight vectors captured from the storage
+  SDK and committed as constants, across every branch of the padding rule. They catch a regression
+  in the port; they would not catch a change upstream in the SDK.
 - `abi.test.ts` — every event signature and struct field order checked against the Solidity
   sources. The app decodes logs positionally, so a reordered parameter would render the wrong
   number beside the right verdict rather than throwing.
