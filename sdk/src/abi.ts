@@ -19,6 +19,9 @@ export const WRIT_REGISTRY_ABI = [
   'error BadSignature(address recovered, address expected)',
   'error AlreadyNotarized(bytes32 id)',
   'error NotNotarized(bytes32 id)',
+  'error ECDSAInvalidSignature()',
+  'error ECDSAInvalidSignatureLength(uint256 length)',
+  'error ECDSAInvalidSignatureS(bytes32 s)',
 ] as const
 
 /**
@@ -50,6 +53,7 @@ export const TREASURY_GATE_ABI = [
   'event Recovered(address indexed to, uint256 amount, uint64 lastAttestationAt)',
   'error NotAgent(address caller)',
   'error NotOwner(address caller)',
+  'error ZeroRecipient()',
   'error RecoveryNotYetAvailable(uint64 availableAt)',
   'error TransferFailed(address to, uint256 amount)',
   'error ModelNotAllowed(bytes32 got, bytes32 want)',

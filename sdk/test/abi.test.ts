@@ -6,13 +6,16 @@ import {
   POLICY_GATE_FACTORY_ABI,
   INFERENCE_SERVING_ABI,
 } from '../src/abi.js'
-import { ensureBuilt, loadArtifact } from './helpers/contracts.js'
+import { buildFailure, ensureBuilt, loadArtifact } from './helpers/contracts.js'
 
 /**
  * The SDK ships hand-written human-readable ABIs so consumers need no build artifacts. That
  * only stays true if they match the compiled contracts, so this suite compiles and compares.
  */
 const compiled = ensureBuilt()
+if (!compiled) {
+  console.warn(`SKIPPING ABI drift checks: contracts/ did not compile.\n${buildFailure}`)
+}
 
 function selectors(abi: ethers.InterfaceAbi): { fns: Set<string>; events: Set<string>; errors: Set<string> } {
   const iface = new ethers.Interface(abi)

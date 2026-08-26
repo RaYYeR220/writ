@@ -25,6 +25,20 @@ export function foundryBin(name: 'forge' | 'anvil' | 'cast'): string {
   return name
 }
 
+/**
+ * Build into a private artifact directory nested inside the already-ignored `out/`.
+ *
+ * Sharing `out/` with whoever is working in `contracts/` means racing their `forge` runs, and
+ * an incremental build that skips a contract leaves an ABI-only artifact with no bytecode to
+ * deploy. Own the directory and the problem goes away.
+ */
+const BUILD_ENV = {
+  ...process.env,
+  FOUNDRY_OUT: 'out/sdk-test',
+  FOUNDRY_CACHE_PATH: 'cache/sdk-test',
+}
+const OUT_DIR = join(CONTRACTS_DIR, 'out', 'sdk-test')
+
 export type Artifact = {
   abi: ReadonlyArray<Record<string, unknown>>
   bytecode?: { object: string }
@@ -34,21 +48,25 @@ let built: boolean | null = null
 /** Why the last `ensureBuilt()` gave up, for suites that want to explain a skip. */
 export let buildFailure = ''
 
-const PROBE = join(CONTRACTS_DIR, 'out', 'WritRegistry.sol', 'WritRegistry.json')
+const PROBE = join(OUT_DIR, 'WritRegistry.sol', 'WritRegistry.json')
 
 /**
  * Compiles the contract suite so the SDK's hand-written ABIs can be checked against the real
  * thing.
  *
  * Returns false only when there is nothing to compare against at all, so the suites that need
- * artifacts skip rather than assert nothing. A build that fails while usable artifacts are
- * already on disk still counts — `forge` is frequently busy when someone is working in
- * `contracts/`, and stale artifacts beat no coverage.
+ * artifacts skip rather than assert nothing instead of failing for reasons that are not the
+ * SDK's: `contracts/` may simply not compile at that moment.
  */
 export function ensureBuilt(): boolean {
   if (built !== null) return built
   try {
-    execFileSync(foundryBin('forge'), ['build'], { cwd: CONTRACTS_DIR, stdio: 'pipe', timeout: 300_000 })
+    execFileSync(foundryBin('forge'), ['build'], {
+      cwd: CONTRACTS_DIR,
+      stdio: 'pipe',
+      timeout: 300_000,
+      env: BUILD_ENV,
+    })
     built = true
   } catch (e) {
     buildFailure = e instanceof Error ? e.message : String(e)
@@ -60,7 +78,7 @@ export function ensureBuilt(): boolean {
 let forced = false
 
 export function loadArtifact(name: string, sourceFile = `${name}.sol`): Artifact {
-  const path = join(CONTRACTS_DIR, 'out', sourceFile, `${name}.json`)
+  const path = join(OUT_DIR, sourceFile, `${name}.json`)
   const read = (): Artifact => {
     if (!existsSync(path)) {
       throw new Error(`missing Foundry artifact ${path}; run \`forge build\` in ${CONTRACTS_DIR}`)
@@ -73,7 +91,12 @@ export function loadArtifact(name: string, sourceFile = `${name}.sol`): Artifact
   // recompile. Deployment needs the bytecode, so ask for it properly, once.
   if (!art.bytecode?.object && !forced) {
     forced = true
-    execFileSync(foundryBin('forge'), ['build', '--force'], { cwd: CONTRACTS_DIR, stdio: 'pipe', timeout: 600_000 })
+    execFileSync(foundryBin('forge'), ['build', '--force'], {
+      cwd: CONTRACTS_DIR,
+      stdio: 'pipe',
+      timeout: 600_000,
+      env: BUILD_ENV,
+    })
     art = read()
   }
   return art

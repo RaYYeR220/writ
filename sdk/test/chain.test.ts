@@ -11,7 +11,7 @@ import {
   TREASURY_GATE_ABI,
   WRIT_REGISTRY_ABI,
 } from '../src/index.js'
-import { ensureBuilt, loadArtifact } from './helpers/contracts.js'
+import { buildFailure, ensureBuilt, loadArtifact } from './helpers/contracts.js'
 import { startAnvil, ANVIL_KEY, type Anvil } from './helpers/anvil.js'
 import { startProviderStub, type ProviderStub } from './helpers/provider-stub.js'
 
@@ -85,6 +85,9 @@ async function attestTransfer(to: string, amount: bigint, content: string) {
 // collected, which is before any hook has run.
 if (compiled) {
   anvil = await startAnvil()
+  if (!anvil) console.warn('SKIPPING chain tests: anvil would not start')
+} else {
+  console.warn(`SKIPPING chain tests: contracts/ did not compile.\n${buildFailure}`)
 }
 if (anvil) {
   // ethers caches every RPC result for 250ms, `eth_getTransactionCount` included, which hands

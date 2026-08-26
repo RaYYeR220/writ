@@ -158,9 +158,14 @@ try {
   )
   receipt = await tx.wait()
 } catch (err) {
-  const revert = (err as { revert?: { name: string; args: unknown[] } }).revert
-  if (revert) {
-    console.error(`\nthe gate rejected the proof: ${revert.name}(${revert.args.join(', ')})`)
+  const e = err as { revert?: { name: string; args: unknown[] }; data?: string }
+  // A revert raised inside WritRegistry bubbles up as raw data the gate's own interface
+  // cannot name, so fall back to the registry's.
+  const named =
+    e.revert ??
+    (typeof e.data === 'string' ? registry.interface.parseError(e.data) : null)
+  if (named) {
+    console.error(`\nthe gate rejected the proof: ${named.name}(${named.args.join(', ')})`)
     console.error('that is a verification failure, not a decision — nothing was executed')
   }
   throw err
