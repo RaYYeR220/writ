@@ -1,8 +1,8 @@
 # Five minutes, in order
 
 Everything in this file is read-only. **No credentials, no install, no funds** for the reading
-path — every link is a file in this repository. Two optional commands at the end need Foundry and
-read 0G mainnet without spending anything.
+path — every link is a file in this repository. The optional commands need Foundry (and, for the
+last group, Node and pnpm); all of them read 0G mainnet without spending anything.
 
 If you only do one thing: open **[`CLAIMS.md`](CLAIMS.md)** and read the **NOT-CLAIMED** section
 first. It is 29 numbered limitations plus four defects we found in our own code and fixed. Several
@@ -95,9 +95,16 @@ copy**, require `teeSignerAcknowledged`, require `verifiability == "TeeML"`, req
 address to equal `teeSignerAddress`, store, emit. [`serving`](contracts/src/WritRegistry.sol#L51)
 is `immutable`.
 
-**In your own browser, right now** — 0G's live mainnet registry, no wallet needed:
-[`0x47340d900bdFec2BD393c626E12ea0656F938d84` on chainscan](https://chainscan.0g.ai/address/0x47340d900bdFec2BD393c626E12ea0656F938d84).
-Call `getAllServices(0, 50)`. Read live on 2026-08-26 for this document: **24 registered services;
+**Check the registry yourself** — 0G's live mainnet contract, no wallet and no key needed:
+[`0x47340d900bdFec2BD393c626E12ea0656F938d84` on chainscan](https://chainscan.0g.ai/address/0x47340d900bdFec2BD393c626E12ea0656F938d84),
+or straight from a terminal:
+
+```bash
+cast call 0x47340d900bdFec2BD393c626E12ea0656F938d84 \
+  "getAllServices(uint256,uint256)" 0 50 --rpc-url https://evmrpc.0g.ai
+```
+
+(the contract caps `limit` at 50). Read live on 2026-08-26 for this document: **24 registered services;
 22 `TeeML`, of which 19 are acknowledged; 13 of those 19 are `ProviderType: centralized`** and
 therefore produce the five-field routing proof, 6 are decentralized with `TargetSeparated: false`
 and produce the chat format, 0 are decentralized-and-separated. 3 `TeeML` services are
@@ -310,7 +317,10 @@ signature against the on-chain `teeSignerAddress`. It discards the transcript's 
 `signingAddress` claim entirely.
 
 **Be told the honest part: that path has never run against live 0G Storage, because nothing is
-deployed to point it at.** Every one of its 105 tests stubs `fetch`. `CLAIMS.md` 6.3, 7.3 and 7.5.
+deployed to point it at.** No app test touches a network — `fetch` is stubbed and chain reads go
+through an injected source surface. The merkle port is checked against 8 frozen vectors captured
+from `@0gfoundation/0g-storage-ts-sdk@1.2.11`, not against the package itself, so it catches a
+regression in our port and would **not** catch a change upstream. `CLAIMS.md` 6.3, 7.3 and 7.5.
 Run it locally with `cd app && cp .env.example .env.local && pnpm dev`; with no registry address
 set, the app states the gap on the page instead of rendering an empty view that would read as "no
 activity yet".
