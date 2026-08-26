@@ -1,12 +1,13 @@
 import type { ethers } from 'ethers'
-import { sha256Hex } from './hashes.js'
+import { sha256Hex, signedText, signedTextRouting, type RoutingFields } from './hashes.js'
 
 /**
  * Everything a stranger needs to re-derive the on-chain proof from public data alone.
  *
  * `request` and `response` are the exact wire bodies. Re-hashing them with sha256 must
- * reproduce `reqHash` and `respHash`, and recovering `signature` over
- * `sha256hex(request):sha256hex(response)` must reproduce the provider's registered TEE signer.
+ * reproduce `reqHash` and `respHash`, rebuilding `signedText` from those hashes (plus
+ * `routing`, for a centralized provider) must reproduce the text the TEE signed, and
+ * recovering `signature` over it must reproduce the provider's registered TEE signer.
  */
 export type Transcript = {
   chatId: string
@@ -16,9 +17,13 @@ export type Transcript = {
   response: string
   reqHash: string
   respHash: string
+  /** The exact text the TEE signed — the artifact everything else is checked against. */
+  signedText: string
   signature: string
   signingAddress: string
   capturedAt: string
+  /** Upstream attribution, present only for a centralized provider's routing proof. */
+  routing?: RoutingFields
 }
 
 export type ArchiveResult = {
@@ -75,8 +80,11 @@ export function serializeTranscript(t: Transcript): Uint8Array {
     response: t.response,
     reqHash: t.reqHash,
     respHash: t.respHash,
+    signedText: t.signedText,
     signature: t.signature,
     signingAddress: t.signingAddress,
+    // Omitted entirely on the chat path, so those roots stay what they always were.
+    ...(t.routing ? { routing: t.routing } : {}),
     capturedAt: t.capturedAt,
   }
   return new TextEncoder().encode(JSON.stringify(ordered, null, 2))
@@ -92,6 +100,12 @@ function assertSelfConsistent(t: Transcript): void {
   }
   if (resp !== t.respHash.toLowerCase()) {
     throw new Error(`transcript respHash ${t.respHash} does not match its own response text (${resp})`)
+  }
+  const rebuilt = t.routing ? signedTextRouting(req, resp, t.routing) : signedText(req, resp)
+  if (rebuilt !== t.signedText) {
+    throw new Error(
+      `transcript signedText ${JSON.stringify(t.signedText)} is not what its own fields rebuild to (${JSON.stringify(rebuilt)})`,
+    )
   }
 }
 

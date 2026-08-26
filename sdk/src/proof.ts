@@ -1,6 +1,11 @@
+import type { RoutingFields } from './hashes.js'
+
 /** What the provider's signature endpoint hands back. */
 export type TeeProof = {
-  /** The text the TEE signed: `sha256hex(request):sha256hex(response)`. */
+  /**
+   * The text the TEE signed. Two fields for a decentralized provider's chat proof, five for a
+   * centralized provider's routing proof — `parseSignedText` tells them apart.
+   */
   text: string
   /** The secp256k1 signature over the EIP-191 hash of `text`. */
   signature: string
@@ -10,6 +15,18 @@ export type TeeProof = {
    * authority is `InferenceServing.getService(provider).teeSignerAddress`.
    */
   signingAddress?: string
+  /**
+   * Upstream attribution, present for a centralized provider.
+   *
+   * Taken from the endpoint's `provider_type` / `provider_identity` / `tls_cert_fingerprint`
+   * when it sends them, and otherwise recovered from `text` — which is the authority either
+   * way, since `text` is what was signed.
+   */
+  routing?: RoutingFields
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
 /**
@@ -54,17 +71,26 @@ export async function fetchProof(
     throw new Error(`proof response was not JSON: ${body.slice(0, 200)}`)
   }
 
-  const { text, signature, signing_address: signingAddress } = (data ?? {}) as Record<string, unknown>
-  if (typeof text !== 'string' || text.length === 0) {
-    throw new Error(`proof response carried no signed text: ${body.slice(0, 200)}`)
-  }
-  if (typeof signature !== 'string' || signature.length === 0) {
-    throw new Error(`proof response carried no signature: ${body.slice(0, 200)}`)
-  }
+  const fields = (data ?? {}) as Record<string, unknown>
+  const text = str(fields['text'])
+  const signature = str(fields['signature'])
+  if (!text) throw new Error(`proof response carried no signed text: ${body.slice(0, 200)}`)
+  if (!signature) throw new Error(`proof response carried no signature: ${body.slice(0, 200)}`)
 
-  return {
-    text,
-    signature,
-    signingAddress: typeof signingAddress === 'string' ? signingAddress : undefined,
-  }
+  // The endpoint reports these separately for a centralized provider, but `text` already
+  // contains them and `text` is what the TEE signed — so let the caller reconcile the two
+  // via `parseSignedText` rather than trusting the loose fields here.
+  const providerType = str(fields['provider_type'])
+  const providerIdentity = str(fields['provider_identity'])
+  const tlsFingerprint = str(fields['tls_cert_fingerprint'])
+  const routing =
+    providerType && providerIdentity && tlsFingerprint
+      ? {
+          providerType,
+          providerIdentity,
+          tlsFingerprint: tlsFingerprint.startsWith('0x') ? tlsFingerprint : `0x${tlsFingerprint}`,
+        }
+      : undefined
+
+  return { text, signature, signingAddress: str(fields['signing_address']), routing }
 }

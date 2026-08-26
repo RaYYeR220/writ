@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { notarize } from '../src/notarize.js'
+import { notarize, notarizeProof, notarizeRoutingProof } from '../src/notarize.js'
+import { signedText, signedTextRouting } from '../src/hashes.js'
 import type { AttestedRun } from '../src/inference.js'
 
 const run: AttestedRun = {
@@ -11,13 +12,17 @@ const run: AttestedRun = {
 }
 
 const WRIT_ID = '0x' + 'ee'.repeat(32)
+const ROUTING_ID = '0x' + 'dd'.repeat(32)
+const ROUTING = { providerType: 'centralized', providerIdentity: 'openai', tlsFingerprint: '0x' + 'cc'.repeat(32) }
 const ROOT = '0x' + 'cd'.repeat(32)
 
 function registryStub(over: Partial<Record<string, unknown>> = {}) {
   return {
     writId: vi.fn(async () => WRIT_ID),
+    routingWritId: vi.fn(async () => ROUTING_ID),
     isNotarized: vi.fn(async () => false),
     notarize: vi.fn(async () => ({ wait: async () => ({ hash: '0xtx', status: 1 }) })),
+    notarizeRoutingProof: vi.fn(async () => ({ wait: async () => ({ hash: '0xrtx', status: 1 }) })),
     ...over,
   }
 }
@@ -26,14 +31,14 @@ describe('notarize', () => {
   it('sends the proof and reports the writ id and tx hash', async () => {
     const registry = registryStub()
     const res = await notarize(registry as never, run, '0xBEEF', '0xsig', ROOT)
-    expect(res).toEqual({ writId: WRIT_ID, txHash: '0xtx', alreadyNotarized: false })
+    expect(res).toEqual({ writId: WRIT_ID, txHash: '0xtx', alreadyNotarized: false, kind: 'chat' })
     expect(registry.notarize).toHaveBeenCalledWith('0xBEEF', run.reqHash, run.respHash, '0xsig', ROOT)
   })
 
   it('treats an existing record as success without sending a second transaction', async () => {
     const registry = registryStub({ isNotarized: vi.fn(async () => true) })
     const res = await notarize(registry as never, run, '0xBEEF', '0xsig', ROOT)
-    expect(res).toEqual({ writId: WRIT_ID, txHash: '', alreadyNotarized: true })
+    expect(res).toEqual({ writId: WRIT_ID, txHash: '', alreadyNotarized: true, kind: 'chat' })
     expect(registry.notarize).not.toHaveBeenCalled()
   })
 
@@ -66,5 +71,76 @@ describe('notarize', () => {
       /32-byte hex/i,
     )
     expect(registry.notarize).not.toHaveBeenCalled()
+  })
+})
+
+describe('notarizeRoutingProof', () => {
+  it('records the upstream attribution the centralized TEE bound', async () => {
+    const registry = registryStub()
+    const res = await notarizeRoutingProof(registry as never, run, '0xBEEF', ROUTING, '0xsig', ROOT)
+    expect(res).toEqual({ writId: ROUTING_ID, txHash: '0xrtx', alreadyNotarized: false, kind: 'routing' })
+    expect(registry.notarizeRoutingProof).toHaveBeenCalledWith(
+      '0xBEEF',
+      run.reqHash,
+      run.respHash,
+      'centralized',
+      'openai',
+      ROUTING.tlsFingerprint,
+      '0xsig',
+      ROOT,
+    )
+  })
+
+  it('refuses a label the contract would reject, before spending gas to find out', async () => {
+    const registry = registryStub()
+    await expect(
+      notarizeRoutingProof(
+        registry as never,
+        run,
+        '0xBEEF',
+        { ...ROUTING, providerIdentity: 'open:ai' },
+        '0xsig',
+        ROOT,
+      ),
+    ).rejects.toThrow(/delimiter/)
+    expect(registry.notarizeRoutingProof).not.toHaveBeenCalled()
+  })
+})
+
+describe('notarizeProof', () => {
+  it('routes a two-field signed text to the chat registry call', async () => {
+    const registry = registryStub()
+    const proof = { text: signedText(run.reqHash, run.respHash), signature: '0xsig' }
+    expect((await notarizeProof(registry as never, run, '0xBEEF', proof, ROOT)).kind).toBe('chat')
+    expect(registry.notarize).toHaveBeenCalled()
+    expect(registry.notarizeRoutingProof).not.toHaveBeenCalled()
+  })
+
+  it('routes a five-field signed text to the routing registry call', async () => {
+    const registry = registryStub()
+    const proof = { text: signedTextRouting(run.reqHash, run.respHash, ROUTING), signature: '0xsig' }
+    expect((await notarizeProof(registry as never, run, '0xBEEF', proof, ROOT)).kind).toBe('routing')
+    expect(registry.notarizeRoutingProof).toHaveBeenCalled()
+    expect(registry.notarize).not.toHaveBeenCalled()
+  })
+
+  it('reads the format off the signed text, not off a loose field the provider reported', async () => {
+    const registry = registryStub()
+    const proof = {
+      text: signedText(run.reqHash, run.respHash),
+      signature: '0xsig',
+      routing: ROUTING, // provider says centralized; the signature says otherwise
+    }
+    expect((await notarizeProof(registry as never, run, '0xBEEF', proof, ROOT)).kind).toBe('chat')
+  })
+
+  it('refuses a signed text in a format it cannot bind', async () => {
+    const registry = registryStub()
+    const images = `${'aa'.repeat(32)}:${'bb'.repeat(32)},${'cc'.repeat(32)}`
+    await expect(
+      notarizeProof(registry as never, run, '0xBEEF', { text: images, signature: '0xsig' }, ROOT),
+    ).rejects.toThrow()
+    expect(registry.notarize).not.toHaveBeenCalled()
+    expect(registry.notarizeRoutingProof).not.toHaveBeenCalled()
   })
 })

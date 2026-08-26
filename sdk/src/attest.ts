@@ -1,5 +1,5 @@
 import type { ethers } from 'ethers'
-import { signedText, verifyProofLocally } from './hashes.js'
+import { parseSignedText, verifyProofLocally, verifyRoutingProofLocally, type RoutingFields } from './hashes.js'
 import type { AttestedRun, InferenceBrokerLike } from './inference.js'
 import type { ArchiveOptions, Transcript } from './archive.js'
 import type { NotarizeResult } from './notarize.js'
@@ -20,10 +20,11 @@ export type AttestDeps = {
   }) => Promise<AttestedRun>
   fetchProof: (endpoint: string, chatId: string, model: string) => Promise<TeeProof>
   archiveTranscript: (t: Transcript, signer: ethers.Signer, opts?: ArchiveOptions) => Promise<string>
+  /** Sends whichever notarization the proof's format calls for — see `notarizeProof`. */
   notarize: (
     run: AttestedRun,
     provider: string,
-    signature: string,
+    proof: TeeProof,
     root: string,
   ) => Promise<Pick<NotarizeResult, 'writId' | 'txHash'> & Partial<NotarizeResult>>
 }
@@ -55,6 +56,10 @@ export type AttestResult = {
   proof: TeeProof
   signature: string
   transcript: Transcript
+  /** Which signed-text format the provider used. */
+  kind: 'chat' | 'routing'
+  /** Upstream attribution, for a centralized provider. */
+  routing?: RoutingFields
 }
 
 /**
@@ -65,6 +70,10 @@ export type AttestResult = {
  * and before any transaction, so a run that cannot be proved costs nothing and produces
  * nothing: there is no path through this function that returns a result without a signature
  * that recovers to the provider's registered TEE signer.
+ *
+ * Both signed-text formats are handled — a decentralized provider's two-field chat proof and a
+ * centralized provider's five-field routing proof — chosen by what the provider actually
+ * signed rather than by configuration.
  *
  * This function stops at the notarization. Executing the decision is a separate transaction on
  * purpose — see `notarize`.
@@ -86,19 +95,26 @@ export async function attest(o: AttestOpts): Promise<AttestResult> {
   // Claim the proof first: it expires.
   const proof = await o.fetchProof(o.endpoint, run.chatId, o.model)
 
-  const expectedText = signedText(run.reqHash, run.respHash)
-  if (proof.text !== expectedText) {
+  // The signed text is the authority on what was proved, including which format it is in.
+  const parsed = parseSignedText(proof.text)
+  if (parsed.reqHash !== run.reqHash.toLowerCase() || parsed.respHash !== run.respHash.toLowerCase()) {
     throw new Error(
-      `provider signed text ${JSON.stringify(proof.text)} but this run is ${JSON.stringify(expectedText)} (chat ${run.chatId})`,
+      `provider signed ${JSON.stringify(proof.text)}, which is not this request and response (chat ${run.chatId})`,
     )
   }
 
-  if (!verifyProofLocally(run.reqHash, run.respHash, proof.signature, o.expectedSigner)) {
+  const verified =
+    parsed.kind === 'routing'
+      ? verifyRoutingProofLocally(run.reqHash, run.respHash, parsed.routing, proof.signature, o.expectedSigner)
+      : verifyProofLocally(run.reqHash, run.respHash, proof.signature, o.expectedSigner)
+
+  if (!verified) {
     throw new Error(
-      `proof does not verify against the registered TEE signer ${o.expectedSigner} (chat ${run.chatId})`,
+      `proof does not verify against the registered TEE signer ${o.expectedSigner} (chat ${run.chatId}, ${parsed.kind} format)`,
     )
   }
 
+  const routing = parsed.kind === 'routing' ? parsed.routing : undefined
   const transcript: Transcript = {
     chatId: run.chatId,
     provider: o.provider,
@@ -107,14 +123,26 @@ export async function attest(o: AttestOpts): Promise<AttestResult> {
     response: new TextDecoder().decode(run.rawResponse),
     reqHash: run.reqHash,
     respHash: run.respHash,
+    signedText: proof.text,
     signature: proof.signature,
     // The verified signer, not whatever the provider volunteered about itself.
     signingAddress: o.expectedSigner,
+    ...(routing ? { routing } : {}),
     capturedAt: new Date().toISOString(),
   }
 
   const transcriptRoot = await o.archiveTranscript(transcript, o.signer as ethers.Signer, o.archiveOptions)
-  const { writId, txHash } = await o.notarize(run, o.provider, proof.signature, transcriptRoot)
+  const { writId, txHash } = await o.notarize(run, o.provider, proof, transcriptRoot)
 
-  return { writId, txHash, transcriptRoot, run, proof, signature: proof.signature, transcript }
+  return {
+    writId,
+    txHash,
+    transcriptRoot,
+    run,
+    proof,
+    signature: proof.signature,
+    transcript,
+    kind: parsed.kind,
+    ...(routing ? { routing } : {}),
+  }
 }

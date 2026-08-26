@@ -22,7 +22,8 @@ import {
   attest,
   archiveTranscript,
   fetchProof,
-  notarize,
+  notarizeProof,
+  refusalName,
   runAttested,
   INFERENCE_SERVING_ABI,
   INFERENCE_SERVING_MAINNET,
@@ -130,10 +131,16 @@ const result = await attest({
   runAttested,
   fetchProof,
   archiveTranscript,
-  notarize: (run, p, sig, root) => notarize(registry as never, run, p, sig, root),
+  notarize: (run, p, proof, root) => notarizeProof(registry as never, run, p, proof, root),
 })
 
 console.log(`\nanswer: ${new TextDecoder().decode(result.run.rawResponse)}`)
+console.log(`proof format    ${result.kind}`)
+if (result.routing) {
+  console.log(
+    `upstream        ${result.routing.providerType}/${result.routing.providerIdentity}, TLS ${result.routing.tlsFingerprint}`,
+  )
+}
 console.log(`writ            ${result.writId}`)
 console.log(`transcript root ${result.transcriptRoot}`)
 console.log(
@@ -146,16 +153,33 @@ console.log(
 
 // A second transaction on purpose. If the gate refuses, the notarization above still stands:
 // the refusal is a permanent public record rather than something a revert erases.
+const decisionKey: string = await treasury['decisionKey']!(teeProvider, result.run.reqHash, result.run.respHash)
+if (await treasury['consumed']!(decisionKey)) {
+  throw new Error(`decision ${decisionKey} has already been acted on; ask again rather than replaying it`)
+}
+
 let receipt: ethers.TransactionReceipt | null = null
 try {
-  const tx = await treasury['execute']!(
-    to,
-    amount,
-    result.run.rawResponse,
-    teeProvider,
-    result.signature,
-    result.transcriptRoot,
-  )
+  // A centralized provider's TEE signs the five-field routing text, which binds the upstream
+  // that answered as well as the question and the answer, so it settles on its own entry point.
+  const tx = result.routing
+    ? await treasury['executeRoutingProof']!(
+        to,
+        amount,
+        result.run.rawResponse,
+        teeProvider,
+        [result.routing.providerType, result.routing.providerIdentity, result.routing.tlsFingerprint],
+        result.signature,
+        result.transcriptRoot,
+      )
+    : await treasury['execute']!(
+        to,
+        amount,
+        result.run.rawResponse,
+        teeProvider,
+        result.signature,
+        result.transcriptRoot,
+      )
   receipt = await tx.wait()
 } catch (err) {
   const e = err as { revert?: { name: string; args: unknown[] }; data?: string }
@@ -190,7 +214,10 @@ console.log(`\nexecuted        ${EXPLORER}/tx/${receipt.hash}`)
 if (approved) {
   console.log(`APPROVED  risk ${approved.args['risk']}  moved ${ethers.formatEther(amount)} 0G to ${to}`)
 } else if (refused) {
-  console.log(`REFUSED   risk ${refused.args['risk']}  no funds moved — this is the gate working`)
+  const by = refusalName(refused.args['refusedBy'] as bigint)
+  const why = by === 'model' ? 'the model answered DENY' : "the gate's risk ceiling said no"
+  console.log(`REFUSED   risk ${refused.args['risk']}  refused by ${by} — ${why}`)
+  console.log('no funds moved, and the refusal is now a permanent public record')
 } else {
   throw new Error(`execution ${receipt.hash} emitted no decision event; refusing to claim an outcome`)
 }

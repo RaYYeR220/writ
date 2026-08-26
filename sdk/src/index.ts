@@ -1,4 +1,15 @@
-export { sha256Hex, signedText, verifyProofLocally } from './hashes.js'
+export {
+  sha256Hex,
+  signedText,
+  signedTextRouting,
+  parseSignedText,
+  assertRoutingFields,
+  verifyProofLocally,
+  verifyRoutingProofLocally,
+  MAX_ROUTING_FIELD_BYTES,
+  type RoutingFields,
+  type ParsedSignedText,
+} from './hashes.js'
 export {
   runAttested,
   type AttestedRun,
@@ -18,7 +29,13 @@ export {
   type ArchiveOptions,
   type IndexerLike,
 } from './archive.js'
-export { notarize, type NotarizeResult, type WritRegistryContract } from './notarize.js'
+export {
+  notarize,
+  notarizeRoutingProof,
+  notarizeProof,
+  type NotarizeResult,
+  type WritRegistryContract,
+} from './notarize.js'
 export { attest, type AttestOpts, type AttestDeps, type AttestResult } from './attest.js'
 export {
   WRIT_REGISTRY_ABI,
@@ -28,4 +45,7 @@ export {
   AGENT_TREASURY_CONSTRUCTOR_ARGS,
   INFERENCE_SERVING_MAINNET,
   INFERENCE_SERVING_GALILEO,
+  REFUSAL,
+  refusalName,
+  type Refusal,
 } from './abi.js'

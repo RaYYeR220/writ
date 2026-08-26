@@ -42,16 +42,37 @@ describe('fetchProof', () => {
       text: 'aa:bb',
       signature: '0xdead',
       signingAddress: undefined,
+      routing: undefined,
     })
     expect(urls[0]).toBe('https://p.invalid/v1/proxy/signature/chat-1?model=m')
   })
 
   it('passes through a signing address when the provider volunteers one', async () => {
     stubFetch(JSON.stringify({ text: 'aa:bb', signature: '0xdead', signing_address: '0xabc' }))
-    await expect(fetchProof('https://p.invalid/v1/proxy', 'chat-1', 'm')).resolves.toEqual({
-      text: 'aa:bb',
-      signature: '0xdead',
+    await expect(fetchProof('https://p.invalid/v1/proxy', 'chat-1', 'm')).resolves.toMatchObject({
       signingAddress: '0xabc',
+    })
+  })
+
+  it('picks up the routing fields a centralized provider reports', async () => {
+    stubFetch(
+      JSON.stringify({
+        text: 'aa:bb:centralized:openai:cc',
+        signature: '0xdead',
+        provider_type: 'centralized',
+        provider_identity: 'openai',
+        tls_cert_fingerprint: 'cc'.repeat(32),
+      }),
+    )
+    await expect(fetchProof('https://p.invalid/v1/proxy', 'chat-1', 'm')).resolves.toMatchObject({
+      routing: { providerType: 'centralized', providerIdentity: 'openai', tlsFingerprint: '0x' + 'cc'.repeat(32) },
+    })
+  })
+
+  it('leaves routing unset when the provider reports only part of it', async () => {
+    stubFetch(JSON.stringify({ text: 'aa:bb', signature: '0xdead', provider_type: 'centralized' }))
+    await expect(fetchProof('https://p.invalid/v1/proxy', 'chat-1', 'm')).resolves.toMatchObject({
+      routing: undefined,
     })
   })
 

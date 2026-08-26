@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { ethers } from 'ethers'
-import { sha256Hex } from '../../src/hashes.js'
+import { sha256Hex, signedTextRouting, type RoutingFields } from '../../src/hashes.js'
 
 export type ProviderStub = {
   /** What `broker.inference.getServiceMetadata()` would return as `endpoint`. */
@@ -28,9 +28,11 @@ export async function startProviderStub(opts: {
   teeKey: string
   /** The assistant content to answer with, e.g. `ALLOW:12`. */
   content: string
+  /** Set to sign the five-field routing text a centralized provider's TEE signs. */
+  routing?: RoutingFields
 }): Promise<ProviderStub> {
   const wallet = new ethers.Wallet(opts.teeKey)
-  const proofs = new Map<string, { text: string; signature: string }>()
+  const proofs = new Map<string, Record<string, string>>()
   let lastRequest = new Uint8Array()
   let expired = false
   let counter = 0
@@ -50,8 +52,23 @@ export async function startProviderStub(opts: {
           const responseText = `{"id":"${chatId}","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"${opts.content}"},"finish_reason":"stop"}]}`
           const responseBytes = new TextEncoder().encode(responseText)
 
-          const text = `${sha256Hex(body)}:${sha256Hex(responseBytes)}`
-          proofs.set(chatId, { text, signature: await wallet.signMessage(text) })
+          const reqHash = '0x' + sha256Hex(body)
+          const respHash = '0x' + sha256Hex(responseBytes)
+          const text = opts.routing
+            ? signedTextRouting(reqHash, respHash, opts.routing)
+            : `${sha256Hex(body)}:${sha256Hex(responseBytes)}`
+
+          proofs.set(chatId, {
+            text,
+            signature: await wallet.signMessage(text),
+            ...(opts.routing
+              ? {
+                  provider_type: opts.routing.providerType,
+                  provider_identity: opts.routing.providerIdentity,
+                  tls_cert_fingerprint: opts.routing.tlsFingerprint,
+                }
+              : {}),
+          })
 
           res.writeHead(200, { 'Content-Type': 'application/json', 'ZG-Res-Key': chatId })
           res.end(responseText)

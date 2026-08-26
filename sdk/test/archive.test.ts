@@ -1,11 +1,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import { MemData } from '@0gfoundation/0g-storage-ts-sdk'
 import { archiveTranscript, serializeTranscript, uploadTranscript, type Transcript } from '../src/archive.js'
-import { sha256Hex } from '../src/hashes.js'
+import { sha256Hex, signedText, signedTextRouting } from '../src/hashes.js'
 
 const enc = new TextEncoder()
 const RESPONSE = '{"id":"chat-1","choices":[{"message":{"content":"ALLOW:12"}}]}'
 const REQUEST = '{"model":"m","messages":[{"role":"user","content":"pinned"}]}'
+
+const REQ_HASH = '0x' + sha256Hex(enc.encode(REQUEST))
+const RESP_HASH = '0x' + sha256Hex(enc.encode(RESPONSE))
+const ROUTING = { providerType: 'centralized', providerIdentity: 'openai', tlsFingerprint: '0x' + 'cc'.repeat(32) }
 
 const transcript: Transcript = {
   chatId: 'chat-1',
@@ -13,11 +17,18 @@ const transcript: Transcript = {
   model: '0GM-1.0-35B-A3B',
   request: REQUEST,
   response: RESPONSE,
-  reqHash: '0x' + sha256Hex(enc.encode(REQUEST)),
-  respHash: '0x' + sha256Hex(enc.encode(RESPONSE)),
+  reqHash: REQ_HASH,
+  respHash: RESP_HASH,
+  signedText: signedText(REQ_HASH, RESP_HASH),
   signature: '0x' + '11'.repeat(65),
   signingAddress: '0x0000000000000000000000000000000000000001',
   capturedAt: '2026-08-26T00:00:00.000Z',
+}
+
+const routingTranscript: Transcript = {
+  ...transcript,
+  signedText: signedTextRouting(REQ_HASH, RESP_HASH, ROUTING),
+  routing: ROUTING,
 }
 
 /** The root the SDK will derive for this transcript, computed locally with no network. */
@@ -84,7 +95,7 @@ describe('archiveTranscript', () => {
   })
 
   it('refuses to archive a transcript whose text does not hash to its own recorded hashes', async () => {
-    const tampered = { ...transcript, response: RESPONSE.replace('ALLOW:12', 'ALLOW:99') }
+    const tampered: Transcript = { ...transcript, response: RESPONSE.replace('ALLOW:12', 'ALLOW:99') }
     const indexer = indexerStub({ rootHash: '0x' + 'ff'.repeat(32), txHash: '0xtx', txSeq: 1 })
     await expect(archiveTranscript(tampered, {} as never, { indexer })).rejects.toThrow(/respHash/)
     expect(indexer.upload).not.toHaveBeenCalled()
@@ -101,5 +112,27 @@ describe('archiveTranscript', () => {
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Transcript
     expect('0x' + sha256Hex(enc.encode(parsed.request))).toBe(transcript.reqHash)
     expect('0x' + sha256Hex(enc.encode(parsed.response))).toBe(transcript.respHash)
+  })
+})
+
+describe('archiving a centralized provider transcript', () => {
+  it('keeps the upstream attribution, so the five-field text stays re-derivable', async () => {
+    const bytes = serializeTranscript(routingTranscript)
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Transcript
+    expect(parsed.routing).toEqual(ROUTING)
+    expect(signedTextRouting(parsed.reqHash, parsed.respHash, parsed.routing!)).toBe(parsed.signedText)
+  })
+
+  it('lands on a different root than the chat transcript for the same exchange', async () => {
+    const [chat] = await new MemData(serializeTranscript(transcript)).merkleTree()
+    const [routing] = await new MemData(serializeTranscript(routingTranscript)).merkleTree()
+    expect(routing!.rootHash()).not.toBe(chat!.rootHash())
+  })
+
+  it('refuses a transcript whose signedText disagrees with its routing fields', async () => {
+    const indexer = indexerStub({ rootHash: '0x' + 'ff'.repeat(32), txHash: '0xtx', txSeq: 1 })
+    const mismatched: Transcript = { ...routingTranscript, routing: { ...ROUTING, providerIdentity: 'someone-else' } }
+    await expect(archiveTranscript(mismatched, {} as never, { indexer })).rejects.toThrow(/signedText/)
+    expect(indexer.upload).not.toHaveBeenCalled()
   })
 })

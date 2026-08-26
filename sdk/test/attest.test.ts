@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ethers } from 'ethers'
-import { signedText, sha256Hex } from '../src/hashes.js'
+import { signedText, signedTextRouting, sha256Hex } from '../src/hashes.js'
 import { attest } from '../src/attest.js'
 import type { AttestedRun } from '../src/inference.js'
 
@@ -19,6 +19,7 @@ const run: AttestedRun = {
 const TEE_KEY = '0x' + '11'.repeat(32)
 const TEE = new ethers.Wallet(TEE_KEY)
 const ROOT = '0x' + 'cd'.repeat(32)
+const ROUTING = { providerType: 'centralized', providerIdentity: 'openai', tlsFingerprint: '0x' + 'cc'.repeat(32) }
 
 function proofFrom(key: string, text = signedText(run.reqHash, run.respHash)) {
   const wallet = new ethers.Wallet(key)
@@ -56,7 +57,14 @@ describe('attest pipeline', () => {
   it('refuses when the provider signed a different question and answer than the ones we hold', async () => {
     const other = signedText('0x' + 'aa'.repeat(32), '0x' + 'bb'.repeat(32))
     const opts = baseOpts({ fetchProof: vi.fn(async () => proofFrom(TEE_KEY, other)) })
-    await expect(attest(opts as never)).rejects.toThrow(/signed text/i)
+    await expect(attest(opts as never)).rejects.toThrow(/not this request and response/i)
+    expect(opts.notarize).not.toHaveBeenCalled()
+  })
+
+  it('refuses a signed text in a format it cannot bind', async () => {
+    const images = `${sha256Hex(enc.encode(REQUEST))}:${'bb'.repeat(32)},${'cc'.repeat(32)}`
+    const opts = baseOpts({ fetchProof: vi.fn(async () => proofFrom(TEE_KEY, images)) })
+    await expect(attest(opts as never)).rejects.toThrow()
     expect(opts.notarize).not.toHaveBeenCalled()
   })
 
@@ -88,27 +96,31 @@ describe('attest pipeline', () => {
     expect(result.writId).toBe('0x' + 'ee'.repeat(32))
     expect(result.txHash).toBe('0xtx')
     expect(result.run).toBe(run)
+    expect(result.kind).toBe('chat')
+    expect(result.routing).toBeUndefined()
   })
 
   it('archives a transcript carrying the exact wire bytes', async () => {
     const opts = baseOpts()
     await attest(opts as never)
-    const [transcript] = opts.archiveTranscript.mock.calls[0] as unknown as [Record<string, string>]
+    const [transcript] = opts.archiveTranscript.mock.calls[0] as unknown as [Record<string, unknown>]
     expect(transcript['request']).toBe(REQUEST)
     expect(transcript['response']).toBe(RESPONSE)
     expect(transcript['reqHash']).toBe(run.reqHash)
     expect(transcript['respHash']).toBe(run.respHash)
+    expect(transcript['signedText']).toBe(signedText(run.reqHash, run.respHash))
     expect(transcript['chatId']).toBe('chat-1')
     expect(transcript['provider']).toBe('0xBEEF')
     expect(transcript['signingAddress']).toBe(TEE.address)
+    expect(transcript['routing']).toBeUndefined()
   })
 
-  it('notarizes the same signature it verified', async () => {
+  it('notarizes the same proof it verified', async () => {
     const proof = proofFrom(TEE_KEY)
     const opts = baseOpts({ fetchProof: vi.fn(async () => proof) })
     const result = await attest(opts as never)
     expect(result.signature).toBe(proof.signature)
-    expect(opts.notarize).toHaveBeenCalledWith(run, '0xBEEF', proof.signature, ROOT)
+    expect(opts.notarize).toHaveBeenCalledWith(run, '0xBEEF', proof, ROOT)
   })
 
   it('does not notarize with a made-up root when archiving fails', async () => {
@@ -129,6 +141,34 @@ describe('attest pipeline', () => {
     })
     await expect(attest(opts as never)).rejects.toThrow(/chat_id_not_found/)
     expect(opts.archiveTranscript).not.toHaveBeenCalled()
+    expect(opts.notarize).not.toHaveBeenCalled()
+  })
+})
+
+describe('attest against a centralized provider', () => {
+  const routingText = signedTextRouting(run.reqHash, run.respHash, ROUTING)
+
+  it('verifies the five-field text and carries the attribution through', async () => {
+    const opts = baseOpts({ fetchProof: vi.fn(async () => proofFrom(TEE_KEY, routingText)) })
+    const result = await attest(opts as never)
+    expect(result.kind).toBe('routing')
+    expect(result.routing).toEqual(ROUTING)
+
+    const [transcript] = opts.archiveTranscript.mock.calls[0] as unknown as [Record<string, unknown>]
+    expect(transcript['signedText']).toBe(routingText)
+    expect(transcript['routing']).toEqual(ROUTING)
+  })
+
+  it('refuses when the routing text is signed by the wrong key', async () => {
+    const opts = baseOpts({ fetchProof: vi.fn(async () => proofFrom('0x' + '22'.repeat(32), routingText)) })
+    await expect(attest(opts as never)).rejects.toThrow(/proof does not verify.*routing/is)
+    expect(opts.notarize).not.toHaveBeenCalled()
+  })
+
+  it('refuses a routing text whose hashes are not the ones we sent and received', async () => {
+    const wrong = signedTextRouting('0x' + 'aa'.repeat(32), run.respHash, ROUTING)
+    const opts = baseOpts({ fetchProof: vi.fn(async () => proofFrom(TEE_KEY, wrong)) })
+    await expect(attest(opts as never)).rejects.toThrow(/not this request and response/i)
     expect(opts.notarize).not.toHaveBeenCalled()
   })
 })
