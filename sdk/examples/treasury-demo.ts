@@ -170,7 +170,9 @@ if (result.routing) {
   )
 }
 console.log(`writ            ${result.writId}`)
-console.log(`transcript root ${result.transcriptRoot}`)
+// A candidate, not a fact: the TEE never signed it. It goes on the writ's append-only list
+// attributed to this wallet, and a reader accepts it only if its bytes re-derive the writ.
+console.log(`transcript root ${result.transcriptRoot} (candidate, published by us)`)
 console.log(
   result.txHash
     ? `notarized       ${EXPLORER}/tx/${result.txHash}`
@@ -190,24 +192,16 @@ let receipt: ethers.TransactionReceipt | null = null
 try {
   // A centralized provider's TEE signs the five-field routing text, which binds the upstream
   // that answered as well as the question and the answer, so it settles on its own entry point.
+  // Neither takes a signature or a root: the gate does not notarize, it reads a record that
+  // already exists. Step 5 put it there, and treated "someone else got there first" as the
+  // success it is — which is why there is nothing to re-check here.
   const tx = result.routing
-    ? await treasury['executeRoutingProof']!(
-        to,
-        amount,
-        result.run.rawResponse,
-        teeProvider,
-        [result.routing.providerType, result.routing.providerIdentity, result.routing.tlsFingerprint],
-        result.signature,
-        result.transcriptRoot,
-      )
-    : await treasury['execute']!(
-        to,
-        amount,
-        result.run.rawResponse,
-        teeProvider,
-        result.signature,
-        result.transcriptRoot,
-      )
+    ? await treasury['executeRoutingProof']!(to, amount, result.run.rawResponse, teeProvider, [
+        result.routing.providerType,
+        result.routing.providerIdentity,
+        result.routing.tlsFingerprint,
+      ])
+    : await treasury['execute']!(to, amount, result.run.rawResponse, teeProvider)
   receipt = await tx.wait()
 } catch (err) {
   const e = err as { revert?: { name: string; args: unknown[] }; data?: string }

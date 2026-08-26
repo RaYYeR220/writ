@@ -20,6 +20,12 @@ export type WritRegistryContract = {
     tlsFingerprint: string,
   ): Promise<string>
   isNotarized(id: string): Promise<boolean>
+  /** Candidate archive pointers, in submission order. See `transcript.ts`. */
+  transcriptRoots(id: string): Promise<readonly string[]>
+  /** Who published a candidate; the zero address when it is not listed. */
+  transcriptSubmitter(id: string, root: string): Promise<string>
+  /** Publish another candidate for an already-notarized writ. */
+  addTranscript(id: string, root: string): Promise<ethers.ContractTransactionResponse>
   notarize(
     provider: string,
     reqHash: string,
@@ -58,21 +64,61 @@ function assertRoot(transcriptRoot: string): void {
   }
 }
 
+/** Whether a revert looks like the registry saying this proof is already on record. */
+function looksAlreadyNotarized(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const e = err as { revert?: { name?: string } | null; shortMessage?: string; message?: string }
+  if (e.revert?.name === 'AlreadyNotarized') return true
+  return /AlreadyNotarized/.test(`${e.shortMessage ?? ''} ${e.message ?? ''}`)
+}
+
+/**
+ * Sends the notarization, and treats "already notarized" as the success it is.
+ *
+ * There is deliberately no `isNotarized` check before the send. Settling can no longer notarize
+ * on the way past — `PolicyGate` reverts `WritNotNotarized` unless the record already exists —
+ * so this is the only thing that puts a writ on chain, and it has to be unconditional. A
+ * read-then-skip would also lose the race it looks like it wins: between the read and the send
+ * someone else can notarize the identical proof, and the revert that follows would abort a
+ * pipeline whose writ is, in fact, exactly where it needs to be.
+ *
+ * The revert is never believed on its own, though. `AlreadyNotarized` in an error string is a
+ * string; the registry is asked whether the record actually exists, and success is reported only
+ * if it says yes. Otherwise the original error is rethrown untouched.
+ */
 async function send(
   writId: string,
   kind: 'chat' | 'routing',
   registry: WritRegistryContract,
   sendTx: () => Promise<ethers.ContractTransactionResponse>,
 ): Promise<NotarizeResult> {
-  if (await registry.isNotarized(writId)) {
-    // Already a matter of public record; nothing to pay for and nothing to fabricate.
-    return { writId, txHash: '', alreadyNotarized: true, kind }
+  const alreadyOnRecord = async (): Promise<boolean> => {
+    try {
+      return await registry.isNotarized(writId)
+    } catch {
+      // If we cannot confirm, we do not claim. The caller gets the original failure.
+      return false
+    }
   }
 
-  const tx = await sendTx()
+  let tx: ethers.ContractTransactionResponse
+  try {
+    tx = await sendTx()
+  } catch (e) {
+    if (looksAlreadyNotarized(e) && (await alreadyOnRecord())) {
+      return { writId, txHash: '', alreadyNotarized: true, kind }
+    }
+    throw e
+  }
+
   const receipt = await tx.wait()
   if (!receipt) throw new Error(`notarization ${tx.hash} produced no receipt; the writ is not confirmed`)
-  if (receipt.status !== 1) throw new Error(`notarization ${receipt.hash} reverted; the writ was not recorded`)
+  if (receipt.status !== 1) {
+    // A revert on chain carries no reason here, so ask the registry what is true rather than
+    // guess: someone else's notarization landing first is a success, anything else is not.
+    if (await alreadyOnRecord()) return { writId, txHash: '', alreadyNotarized: true, kind }
+    throw new Error(`notarization ${receipt.hash} reverted; the writ was not recorded`)
+  }
 
   return { writId, txHash: receipt.hash, alreadyNotarized: false, kind }
 }

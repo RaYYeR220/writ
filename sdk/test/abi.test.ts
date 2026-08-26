@@ -28,6 +28,36 @@ function selectors(abi: ethers.InterfaceAbi): { fns: Set<string>; events: Set<st
   return { fns, events, errors }
 }
 
+/**
+ * What each function RETURNS, which a selector does not cover.
+ *
+ * A selector is computed over the inputs alone, so `getWrit(bytes32)` keeps its selector when a
+ * field is added to or removed from the struct it returns. That is the drift that does not
+ * throw — it shifts every later field by one and hands back the wrong value under the right
+ * name — so the return shapes are compared by name and type, in order, on their own.
+ */
+function returnShapes(abi: ethers.InterfaceAbi): Map<string, { types: string; names: string[] }> {
+  const iface = new ethers.Interface(abi)
+  const out = new Map<string, { types: string; names: string[] }>()
+
+  const names: string[] = []
+  // Paths are positional, never parented by a name: Solidity leaves an unnamed return unnamed,
+  // so `getRoutingProof`'s tuple is `p` on chain and anonymous here while its FIELDS — the part
+  // a positional read depends on — are named identically on both sides.
+  const walk = (p: ethers.ParamType, path: string): string => {
+    if (path.includes('.') || /^\d+\./.test(path)) names.push(`${path}:${p.name}`)
+    if (!p.components) return p.type
+    return `(${p.components.map((c, i) => walk(c, `${path}.${i}`)).join(',')})${p.type.endsWith('[]') ? '[]' : ''}`
+  }
+
+  iface.forEachFunction((f) => {
+    names.length = 0
+    const types = f.outputs.map((o, i) => walk(o, String(i))).join(',')
+    out.set(f.format('sighash'), { types, names: [...names] })
+  })
+  return out
+}
+
 describe('exported ABIs', () => {
   it('parse as valid ethers interfaces', () => {
     for (const abi of [WRIT_REGISTRY_ABI, TREASURY_GATE_ABI, POLICY_GATE_FACTORY_ABI, INFERENCE_SERVING_ABI]) {
@@ -69,6 +99,68 @@ describe('exported ABIs', () => {
     const real = selectors(loadArtifact('IInferenceServing').abi as unknown as ethers.InterfaceAbi)
     const mine = selectors(INFERENCE_SERVING_ABI as unknown as ethers.InterfaceAbi)
     for (const f of mine.fns) expect([...real.fns]).toContain(f)
+  })
+
+  it.runIf(compiled)('returns what the compiled contracts return, field for field and in order', () => {
+    // The check a selector cannot make. `WritRegistry.Writ` lost `transcriptRoot`, and every
+    // field after it shifted up one — a change no selector, topic hash or argument list notices.
+    for (const [name, contract] of [
+      ['WritRegistry', WRIT_REGISTRY_ABI],
+      ['TreasuryGate', TREASURY_GATE_ABI],
+      ['PolicyGateFactory', POLICY_GATE_FACTORY_ABI],
+      ['IInferenceServing', INFERENCE_SERVING_ABI],
+    ] as const) {
+      const real = returnShapes(loadArtifact(name).abi as unknown as ethers.InterfaceAbi)
+      const mine = returnShapes(contract as unknown as ethers.InterfaceAbi)
+      for (const [sighash, shape] of mine) {
+        const theirs = real.get(sighash)
+        expect(theirs, `${name}.${sighash} is not on the compiled contract`).toBeDefined()
+        expect(shape.types, `${name}.${sighash} returns different types`).toBe(theirs!.types)
+        // Solidity leaves an unnamed return unnamed, so only the labels we actually declare are
+        // compared — the struct field names, which are what a positional read hangs on.
+        for (const field of shape.names) {
+          expect(theirs!.names, `${name}.${sighash} has no field ${field}`).toContain(field)
+        }
+      }
+    }
+  })
+
+  it.runIf(compiled)('carries the whole transcript-candidate surface', () => {
+    // A reader must be able to walk every candidate root, not trust one pointer, so the ABI has
+    // to expose the list, its length, the pair at an index, and who claimed each one.
+    const iface = new ethers.Interface(WRIT_REGISTRY_ABI as unknown as ethers.InterfaceAbi)
+    for (const fn of [
+      'transcriptRoots',
+      'transcriptRootCount',
+      'transcriptRootAt',
+      'transcriptSubmitter',
+      'transcriptQuotaUsed',
+      'addTranscript',
+      'MAX_ROOTS_PER_SUBMITTER',
+    ]) {
+      expect(iface.getFunction(fn), `WRIT_REGISTRY_ABI has no ${fn}`).toBeTruthy()
+    }
+    expect(iface.getEvent('TranscriptAdded')).toBeTruthy()
+
+    // And the removed single pointer is gone from both the record and its event, so nothing
+    // downstream can go on reading one.
+    expect(iface.getFunction('getWrit')!.outputs[0]!.components!.map((c) => c.name)).toEqual([
+      'provider',
+      'modelHash',
+      'reqHash',
+      'respHash',
+      'notarizedAt',
+      'notarizedBy',
+    ])
+    expect(iface.getEvent('Notarized')!.inputs.map((i) => i.name)).toEqual([
+      'id',
+      'provider',
+      'modelHash',
+      'model',
+      'reqHash',
+      'respHash',
+      'notarizedBy',
+    ])
   })
 
   it.runIf(compiled)('can decode every revert the gate can produce', () => {

@@ -35,11 +35,49 @@ describe('notarize', () => {
     expect(registry.notarize).toHaveBeenCalledWith('0xBEEF', run.reqHash, run.respHash, '0xsig', ROOT)
   })
 
-  it('treats an existing record as success without sending a second transaction', async () => {
-    const registry = registryStub({ isNotarized: vi.fn(async () => true) })
+  /**
+   * Settling can no longer notarize on the way past — the gate reverts `WritNotNotarized`
+   * unless the record already exists — so this is the only thing that puts a writ on chain and
+   * it goes out unconditionally. `AlreadyNotarized` is then the success case, not a failure.
+   */
+  it('treats AlreadyNotarized as success, because the record is what was wanted', async () => {
+    const registry = registryStub({
+      isNotarized: vi.fn(async () => true),
+      notarize: vi.fn(async () => {
+        throw Object.assign(new Error('execution reverted'), { revert: { name: 'AlreadyNotarized' } })
+      }),
+    })
+
     const res = await notarize(registry as never, run, '0xBEEF', '0xsig', ROOT)
     expect(res).toEqual({ writId: WRIT_ID, txHash: '', alreadyNotarized: true, kind: 'chat' })
-    expect(registry.notarize).not.toHaveBeenCalled()
+    // It still tried: a read-then-skip loses the race it looks like it wins.
+    expect(registry.notarize).toHaveBeenCalled()
+  })
+
+  it('does not claim success on an AlreadyNotarized revert the registry will not confirm', async () => {
+    // The word in an error string is a string. The record is the fact, so it gets asked.
+    const registry = registryStub({
+      isNotarized: vi.fn(async () => false),
+      notarize: vi.fn(async () => {
+        throw Object.assign(new Error('execution reverted'), { revert: { name: 'AlreadyNotarized' } })
+      }),
+    })
+
+    await expect(notarize(registry as never, run, '0xBEEF', '0xsig', ROOT)).rejects.toThrow(/execution reverted/)
+  })
+
+  it('reports success when someone else notarizes the same proof mid-flight', async () => {
+    // The exact race a pre-check cannot close: nothing on record when we start, someone else's
+    // identical proof lands first, our transaction reverts on chain with no reason string —
+    // and the writ is nonetheless exactly where the pipeline needs it.
+    const registry = registryStub({
+      isNotarized: vi.fn(async () => true),
+      notarize: vi.fn(async () => ({ wait: async () => ({ hash: '0xtx', status: 0 }) })),
+    })
+
+    const res = await notarize(registry as never, run, '0xBEEF', '0xsig', ROOT)
+    expect(res.alreadyNotarized).toBe(true)
+    expect(res.writId).toBe(WRIT_ID)
   })
 
   it('propagates a rejected notarization rather than reporting a writ that does not exist', async () => {

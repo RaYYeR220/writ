@@ -3,8 +3,11 @@ import { ethers } from 'ethers'
 import {
   attest,
   fetchProof,
+  listTranscriptCandidates,
   notarizeProof,
+  rederivesWrit,
   refusalName,
+  resolveTranscript,
   runAttested,
   sha256Hex,
   type RoutingFields,
@@ -228,7 +231,7 @@ describe('writ pipeline on a local chain', () => {
 
     const { result } = await attestTransfer(to, amount, 'ALLOW:12')
     await (
-      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT, GAS)
+      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, GAS)
     ).wait()
 
     // The same call now describes a different treasury, because it is a different treasury.
@@ -253,7 +256,7 @@ describe('writ pipeline on a local chain', () => {
     ).wait()
 
     await expect(
-      treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT),
+      treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER),
     ).rejects.toThrow()
     expect(await wallet.provider!.getBalance(to)).toBe(0n)
   })
@@ -269,12 +272,18 @@ describe('writ pipeline on a local chain', () => {
     const writ = await registry['getWrit']!(result.writId)
     expect(writ.reqHash).toBe(result.run.reqHash)
     expect(writ.respHash).toBe(result.run.respHash)
-    expect(writ.transcriptRoot).toBe(ROOT)
     expect(writ.modelHash).toBe(ethers.keccak256(ethers.toUtf8Bytes(MODEL)))
+
+    // The record itself holds no pointer. The root supplied at notarization went in through the
+    // same door as any later one — listed as a candidate, attributed to whoever sent it.
+    expect(writ.transcriptRoot).toBeUndefined()
+    expect(await registry['transcriptRoots']!(result.writId)).toEqual([ROOT])
+    expect(await registry['transcriptSubmitter']!(result.writId, ROOT)).toBe(wallet.address)
+    expect(await registry['transcriptQuotaUsed']!(result.writId, wallet.address)).toBe(1n)
 
     const before = await wallet.provider!.getBalance(to)
     const receipt = await (
-      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT, GAS)
+      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, GAS)
     ).wait()
 
     expect(decisionEvent(receipt).name).toBe('TransferApproved')
@@ -290,7 +299,7 @@ describe('writ pipeline on a local chain', () => {
     expect(await registry['isNotarized']!(result.writId)).toBe(true)
 
     const receipt = await (
-      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT, GAS)
+      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, GAS)
     ).wait()
     expect(receipt.status).toBe(1)
 
@@ -306,7 +315,7 @@ describe('writ pipeline on a local chain', () => {
     const { result } = await attestTransfer(to, amount, `ALLOW:${MAX_RISK + 30}`)
 
     const receipt = await (
-      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, result.signature, ROOT, GAS)
+      await treasury['execute']!(to, amount, result.run.rawResponse, PROVIDER, GAS)
     ).wait()
     expect(receipt.status).toBe(1)
 
@@ -334,7 +343,7 @@ describe('writ pipeline on a local chain', () => {
     expect(await registry['isNotarized']!(id)).toBe(true)
 
     // The gate still refuses it, because it answers the wrong question.
-    await expect(treasury['execute']!(to, amount, response, PROVIDER, signature, ROOT)).rejects.toThrow()
+    await expect(treasury['execute']!(to, amount, response, PROVIDER)).rejects.toThrow()
     expect(await wallet.provider!.getBalance(to)).toBe(0n)
   })
 
@@ -411,6 +420,141 @@ describe('writ pipeline on a local chain', () => {
 })
 
 /**
+ * The archive pointer is a claim, and the registry treats it as one.
+ *
+ * These run against the real compiled contract, because the whole point is what the chain
+ * enforces: anyone may append, nobody may spend anyone else's room, and the reader decides by
+ * re-derivation rather than by who arrived first.
+ */
+describe('transcript candidates on a local chain', () => {
+  it.runIf(live())('lets a stranger publish a pointer beside the notarizer’s', async () => {
+    const to = ethers.Wallet.createRandom().address
+    const { result } = await attestTransfer(to, ethers.parseEther('1'), 'DENY:80')
+
+    const stranger = new ethers.Wallet(ethers.hexlify(ethers.randomBytes(32)), wallet.provider)
+    await (await wallet.sendTransaction({ to: stranger.address, value: ethers.parseEther('1') })).wait()
+
+    const theirRoot = '0x' + 'ab'.repeat(32)
+    const asStranger = new ethers.Contract(await registry.getAddress(), WRIT_REGISTRY_ABI, stranger)
+    await (await asStranger['addTranscript']!(result.writId, theirRoot)).wait()
+
+    // Submission order, and each attributed to whoever actually sent it.
+    expect(await registry['transcriptRoots']!(result.writId)).toEqual([ROOT, theirRoot])
+    expect(await registry['transcriptSubmitter']!(result.writId, theirRoot)).toBe(stranger.address)
+    expect(await registry['transcriptRootCount']!(result.writId)).toBe(2n)
+
+    const [root, submitter] = await registry['transcriptRootAt']!(result.writId, 1n)
+    expect(root).toBe(theirRoot)
+    expect(submitter).toBe(stranger.address)
+
+    // A griefer can exhaust their own quota and nobody else's.
+    const quota: bigint = await registry['MAX_ROOTS_PER_SUBMITTER']!()
+    for (let i = 1n; i < quota; i++) {
+      await (await asStranger['addTranscript']!(result.writId, '0x' + i.toString(16).padStart(2, '0').repeat(32))).wait()
+    }
+    await expect(asStranger['addTranscript']!(result.writId, '0x' + 'fe'.repeat(32))).rejects.toThrow()
+    // The notarizer still has room, which is the entire reason the quota is per address.
+    await (await registry['addTranscript']!(result.writId, '0x' + 'fd'.repeat(32))).wait()
+    expect(await registry['transcriptSubmitter']!(result.writId, '0x' + 'fd'.repeat(32))).toBe(wallet.address)
+  })
+
+  it.runIf(live())('refuses a duplicate, an empty root, and an unknown writ', async () => {
+    const to = ethers.Wallet.createRandom().address
+    const { result } = await attestTransfer(to, ethers.parseEther('1'), 'DENY:80')
+
+    await expect(registry['addTranscript']!(result.writId, ROOT)).rejects.toThrow()
+    await expect(registry['addTranscript']!(result.writId, ethers.ZeroHash)).rejects.toThrow()
+    await expect(registry['addTranscript']!('0x' + 'cc'.repeat(32), ROOT)).rejects.toThrow()
+  })
+
+  it.runIf(live())('resolves the real transcript past a front-runner’s junk root', async () => {
+    // Notarize with a zero root, so the list starts empty and the junk pointer really is first.
+    // That is the shape of the attack: the signature endpoint is public, so whoever learns a
+    // chat id can publish before the archivist does.
+    const to = ethers.Wallet.createRandom().address
+    const amount = ethers.parseEther('1')
+    const stub2 = await startProviderStub({ teeKey: TEE_KEY, content: 'DENY:80' })
+    try {
+      const bodyBytes = ethers.getBytes(await treasury['previewRequestBody']!(to, amount))
+      const run = await runAttested({ broker, provider: PROVIDER, endpoint: stub2.endpoint, bodyBytes })
+      const proof = await fetchProof(stub2.endpoint, run.chatId, MODEL)
+      await (
+        await registry['notarize']!(PROVIDER, run.reqHash, run.respHash, proof.signature, ethers.ZeroHash)
+      ).wait()
+
+      const writId: string = await registry['writId']!(PROVIDER, run.reqHash, run.respHash)
+      // A zero root lists nothing, so the writ starts with no candidates at all.
+      expect(await registry['transcriptRoots']!(writId)).toEqual([])
+
+      const junkRoot = '0x' + 'ba'.repeat(32)
+      const realRoot = '0x' + 'be'.repeat(32)
+      await (await registry['addTranscript']!(writId, junkRoot)).wait()
+      await (await registry['addTranscript']!(writId, realRoot)).wait()
+
+      const archive: Record<string, Uint8Array> = {
+        [junkRoot.toLowerCase()]: enc.encode(JSON.stringify({ request: 'a different exchange', response: 'nope' })),
+        [realRoot.toLowerCase()]: enc.encode(
+          JSON.stringify({
+            request: new TextDecoder().decode(bodyBytes),
+            response: new TextDecoder().decode(run.rawResponse),
+          }),
+        ),
+      }
+
+      const writ = await registry['getWrit']!(writId)
+      const resolution = await resolveTranscript({
+        candidates: await listTranscriptCandidates(registry as never, writId),
+        download: async (root: string) => {
+          const bytes = archive[root.toLowerCase()]
+          if (!bytes) throw new Error('0G Storage indexer answered: File not found (code 101)')
+          return bytes
+        },
+        accept: rederivesWrit({ reqHash: writ.reqHash, respHash: writ.respHash }),
+      })
+
+      expect(resolution.ok).toBe(true)
+      if (!resolution.ok) throw new Error('unreachable')
+      // Second in the list, and it wins anyway.
+      expect(resolution.root).toBe(realRoot)
+      expect(resolution.index).toBe(1)
+      expect(resolution.candidates[0]!.state).toBe('rejected')
+      expect(resolution.candidates[0]!.reason).toMatch(/question/)
+    } finally {
+      await stub2.stop()
+    }
+  })
+})
+
+describe('the gate settles a record it did not make', () => {
+  it.runIf(live())('refuses to act on a writ nobody has notarized', async () => {
+    // Inline notarization is gone, so a proof that was never recorded has nothing to settle.
+    // The revert is `WritNotNotarized`, and the funds do not move.
+    const to = ethers.Wallet.createRandom().address
+    const amount = ethers.parseEther('1')
+
+    const provider = await startProviderStub({ teeKey: TEE_KEY, content: 'ALLOW:12' })
+    try {
+      const bodyBytes = ethers.getBytes(await treasury['previewRequestBody']!(to, amount))
+      const run = await runAttested({ broker, provider: PROVIDER, endpoint: provider.endpoint, bodyBytes })
+      const id = await registry['writId']!(PROVIDER, run.reqHash, run.respHash)
+      expect(await registry['isNotarized']!(id)).toBe(false)
+
+      // Through `staticCall`, because that is the path ethers decodes custom errors on — and
+      // the name is the point: an operator has to be told the writ is missing, not handed
+      // "execution reverted (unknown custom error)".
+      await expect(
+        treasury['execute']!.staticCall(to, amount, run.rawResponse, PROVIDER),
+      ).rejects.toThrow(/WritNotNotarized/)
+
+      await expect(treasury['execute']!(to, amount, run.rawResponse, PROVIDER)).rejects.toThrow()
+      expect(await wallet.provider!.getBalance(to)).toBe(0n)
+    } finally {
+      await provider.stop()
+    }
+  })
+})
+
+/**
  * Most live 0G mainnet providers are centralized, and their TEE signs a five-field text that
  * also names the upstream that answered. Without this path the SDK reaches almost nobody.
  */
@@ -448,8 +592,6 @@ describe('centralized provider routing proofs', () => {
         result.run.rawResponse,
         PROVIDER,
         [ROUTING.providerType, ROUTING.providerIdentity, ROUTING.tlsFingerprint],
-        result.signature,
-        ROOT,
         GAS,
       )
     ).wait()
@@ -470,8 +612,6 @@ describe('centralized provider routing proofs', () => {
         result.run.rawResponse,
         PROVIDER,
         [ROUTING.providerType, ROUTING.providerIdentity, ROUTING.tlsFingerprint],
-        result.signature,
-        ROOT,
         GAS,
       )
     ).wait()
@@ -495,8 +635,6 @@ describe('centralized provider routing proofs', () => {
         result.run.rawResponse,
         PROVIDER,
         [ROUTING.providerType, 'someone-else', ROUTING.tlsFingerprint],
-        result.signature,
-        ROOT,
       ),
     ).rejects.toThrow()
     expect(await wallet.provider!.getBalance(to)).toBe(0n)

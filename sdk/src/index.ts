@@ -38,6 +38,16 @@ export {
 } from './notarize.js'
 export { attest, type AttestOpts, type AttestDeps, type AttestResult } from './attest.js'
 export {
+  listTranscriptCandidates,
+  resolveTranscript,
+  rederivesWrit,
+  explainNoCandidate,
+  type TranscriptCandidate,
+  type CandidateOutcome,
+  type TranscriptResolution,
+  type TranscriptRegistry,
+} from './transcript.js'
+export {
   WRIT_REGISTRY_ABI,
   TREASURY_GATE_ABI,
   POLICY_GATE_FACTORY_ABI,
