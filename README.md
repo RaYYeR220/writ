@@ -231,7 +231,7 @@ enclave's. Remove 0G Storage and the record stops being readable by anyone but i
 | [`sdk/`](sdk) | TypeScript client. Raw-byte inference, proof capture, local verification before anything is paid for, 0G Storage archival, notarization. Never hashes a re-serialized object | **118** |
 | [`mcp/`](mcp) | MCP server — `writ_preview_question`, `writ_attest`, `writ_execute`, `writ_lookup`. Any MCP-speaking agent can produce and settle its own attested decisions. Install notes: [`mcp/README.md`](mcp/README.md) | **145** |
 | [`app/`](app) | Next.js 16 / React 19 docket. `/` every decision, `/writ/[id]` one proof chain as four independently checkable rows plus a live tamper demo, `/studio` compose and deploy a policy, `/gate/[address]` one treasury. Notes: [`app/README.md`](app/README.md) | **105** |
-| [`eval/`](eval) | 38 pre-registered scenarios, graded against a committed answer key, run end to end through the real SDK and the real contracts | 38 scenarios |
+| [`eval/`](eval) | Pre-registered scenarios, graded against a committed answer key, run end to end through the real SDK and the real contracts | 43 scenarios |
 
 **585 tests in total**, all re-run on 2026-08-26 for this README. Counts per suite:
 
@@ -243,9 +243,9 @@ app         105 passed              (no chain, no network)
 ```
 
 The graded evaluation's committed scorecard (`eval/results/fork.json`, read back for this README):
-38 scenarios, 38 ran, 0 errored, **0 false approvals**, 0 false refusals, 8 correct approvals, 30
-correct refusals, 18/18 traps refused, 4/4 negative controls failed as designed, 0 mechanism
-mismatches; 25 scenarios answered adversarially, 13 supplied a correct answer.
+43 scenarios, 43 ran, 0 errored, **0 false approvals**, 0 false refusals, 9 correct approvals, 34
+correct refusals, 21/21 traps refused, 4/4 negative controls failed as designed, 0 mechanism
+mismatches; 28 scenarios answered adversarially, 15 supplied a correct answer.
 
 **Read what that scorecard is worth before you read the numbers.** It ran on a fork, where the
 "TEE" is a key we generated and whoever holds the key decides what the "model" says. It measures
@@ -418,8 +418,10 @@ window is charged to it. Never quote one without the mode that produced it.
    alone in a browser. That closes `CLAIMS.md` 6.3 and turns `app/test/verify.test.ts` from logic
    into evidence.
 4. Run the `--live` evaluation against a real TEE provider and publish the scorecard beside the
-   fork one. 36 of the 38 scenarios execute unchanged; 2 report as skipped with their reasons,
-   because they need a signer we control.
+   fork one. Two scenarios always skip, because they need a signer we control; five more skip
+   unless the provider is centralized. So a live run grades 41 of 43 against a centralized
+   provider and 36 of 43 against a decentralized one, with every skip printed with its reason and
+   counted as a skip rather than a pass.
 5. `PROOF.md` — transaction hashes, block numbers, and the addresses filled into the section below.
 
 **Wave 5 — widen the surface without widening the claims.**
