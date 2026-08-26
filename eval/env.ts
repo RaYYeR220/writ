@@ -84,6 +84,14 @@ export type EvalEnv = {
   forgedSession?: (answer: string) => Promise<Session>
   /** Restores the treasury to a known balance where that is possible. Returns the balance in force. */
   primeTreasury: (target: bigint) => Promise<bigint>
+  /**
+   * Moves the treasury's balance by paying into it, as an outsider would.
+   *
+   * A plain transaction rather than a cheat code, so it means the same thing in both modes: the
+   * question the gate asks now reports a different balance, which is exactly what the
+   * state-drift probe needs to demonstrate. Returns the balance afterwards.
+   */
+  depositToTreasury: (amount: bigint) => Promise<bigint>
   /** Verified statements about this environment, for the report. */
   facts: string[]
   /** Caveats about this environment, for the report. */
@@ -300,6 +308,10 @@ export async function forkEnv(): Promise<EvalEnv> {
       await rpc.send('anvil_setBalance', [treasuryAddress, ethers.toBeHex(target)])
       return await rpc.getBalance(treasuryAddress)
     },
+    depositToTreasury: async (amount: bigint) => {
+      await (await wallet.sendTransaction({ to: treasuryAddress, value: amount })).wait()
+      return await rpc.getBalance(treasuryAddress)
+    },
     facts,
     caveats,
     stop: async () => {
@@ -392,6 +404,10 @@ export async function liveEnv(): Promise<EvalEnv> {
       close: async () => {},
     }),
     primeTreasury: async () => await rpc.getBalance(treasuryAddress),
+    depositToTreasury: async (amount: bigint) => {
+      await (await wallet.sendTransaction({ to: treasuryAddress, value: amount })).wait()
+      return await rpc.getBalance(treasuryAddress)
+    },
     facts,
     caveats,
     stop: async () => {},

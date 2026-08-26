@@ -30,15 +30,17 @@ import {
   type AttestResult,
 } from '../sdk/src/index.js'
 import { forkEnv, liveEnv, EXPLORER, type EvalEnv, type Session } from './env.js'
-import type {
-  AmountSpec,
-  AnswerSource,
-  Outcome,
-  RecipientSpec,
-  Result,
-  Scenario,
-  ScenarioFile,
-  Scorecard,
+import {
+  QUESTION_FACTS,
+  type AmountSpec,
+  type AnswerSource,
+  type Outcome,
+  type QuestionFact,
+  type RecipientSpec,
+  type Result,
+  type Scenario,
+  type ScenarioFile,
+  type Scorecard,
 } from './types.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -132,11 +134,82 @@ async function gateBody(env: EvalEnv, to: string, amount: bigint): Promise<Uint8
   return ethers.getBytes(await env.treasury['previewRequestBody']!(to, amount))
 }
 
-/** The gate's question for a nonce it will not be pinning. */
-async function bodyForNonce(env: EvalEnv, to: string, amount: bigint, n: bigint): Promise<Uint8Array> {
-  const params: string = await env.treasury['buildParams']!(to, amount, n)
+/** The nine facts the gate pins, as text, because that is how the question carries them. */
+type Facts = Record<QuestionFact, string>
+
+/** `TreasuryGate._percentOfBalance`, mirrored. Checked against the contract before it is used. */
+function percentOfBalance(amount: bigint, balance: bigint): bigint {
+  const CAP = 999n
+  if (amount === 0n) return 0n
+  if (balance === 0n) return CAP
+  const pct = (amount * 100n) / balance
+  return pct > CAP ? CAP : pct
+}
+
+/**
+ * What the gate would report about this transfer, read from the gate's own state.
+ *
+ * Every field is a live read. Nothing here is remembered from earlier in the run, because the
+ * whole point of the probes below is that the gate's answer to "what is true right now" is not
+ * the client's to decide.
+ */
+async function factsFor(env: EvalEnv, to: string, amount: bigint): Promise<Facts> {
+  const t = env.treasury
+  const [balance, nonce, approvals, refusals, history] = await Promise.all([
+    env.wallet.provider!.getBalance(env.treasuryAddress),
+    t['nonce']!() as Promise<bigint>,
+    t['approvedCount']!() as Promise<bigint>,
+    t['refusedCount']!() as Promise<bigint>,
+    t['recipientHistory']!(to) as Promise<[bigint, bigint]>,
+  ])
+  return {
+    recipient: to.toLowerCase(),
+    amount: amount.toString(),
+    nonce: nonce.toString(),
+    treasuryBalance: balance.toString(),
+    amountPctOfBalance: percentOfBalance(amount, balance).toString(),
+    priorApprovals: approvals.toString(),
+    priorRefusals: refusals.toString(),
+    recipientPriorPayments: history[0].toString(),
+    recipientPriorTotal: history[1].toString(),
+  }
+}
+
+function renderFacts(f: Facts): string {
+  return QUESTION_FACTS.map((k) => `${k}=${f[k]}`).join(' ')
+}
+
+/**
+ * A request body carrying facts that are not the gate's, wrapped in the policy's own prompt.
+ *
+ * The mirror is proved first: our rendering of the *honest* facts must be byte-identical to what
+ * `buildParams` returns. If it is not, the probe would be measuring our formatting bug rather
+ * than the gate's binding, so it refuses to run rather than producing a scenario that passes for
+ * the wrong reason.
+ */
+async function bodyForFacts(env: EvalEnv, honest: Facts, doctored: Facts): Promise<Uint8Array> {
+  const ours = renderFacts(honest)
+  const gates = dec.decode(ethers.getBytes(await env.treasury['buildParams']!(honest.recipient, BigInt(honest.amount))))
+  if (ours !== gates) {
+    throw new Error(`the harness's copy of the gate's question has drifted.\n  gate: ${gates}\n  ours: ${ours}`)
+  }
   const policyId: bigint = await env.treasury['POLICY_ID']!()
+  const params = ethers.toUtf8Bytes(renderFacts(doctored))
   return ethers.getBytes(await env.treasury['buildRequestBody']!(policyId, params))
+}
+
+/** Applies a scenario's lies to the truth, and says what was changed. */
+function doctorFacts(honest: Facts, overrides: Partial<Record<QuestionFact, string>>): { facts: Facts; lies: string[] } {
+  const facts = { ...honest }
+  const lies: string[] = []
+  for (const key of Object.keys(overrides) as QuestionFact[]) {
+    if (!QUESTION_FACTS.includes(key)) throw new Error(`factOverrides names ${key}, which the gate does not report`)
+    const value = overrides[key]!
+    lies.push(`${key} ${honest[key]} -> ${value}`)
+    facts[key] = value
+  }
+  if (lies.length === 0) throw new Error('a doctored-facts scenario with no factOverrides would be an honest run')
+  return { facts, lies }
 }
 
 /** How many bytes the policy appends after the parameters, so an injection can be spliced in front. */
@@ -291,23 +364,58 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
     }
 
     case 'stale-nonce': {
-      let nonce: bigint = await env.treasury['nonce']!()
       const offset = BigInt(s.nonceOffset ?? -1)
       let detail: string | undefined
-      if (nonce + offset < 0n) {
+      let honest = await factsFor(env, to, amount)
+      if (BigInt(honest.nonce) + offset < 0n) {
         // A negative offset needs somewhere to go. Spend one decision so the gate has a past.
         const w = await attestWith(env, session, await gateBody(env, to, 1n))
         await settle(env, to, 1n, w.run.rawResponse, env.provider, w.signature, w.transcriptRoot)
-        nonce = await env.treasury['nonce']!()
+        // Re-read: that settlement moved the nonce, the balance and this recipient's history,
+        // so every other fact in the question has to be the one the gate would report now.
+        honest = await factsFor(env, to, amount)
         detail = 'ran a warm-up settlement first so the gate had a previous nonce to be stale against'
       }
-      const body = await bodyForNonce(env, to, amount, nonce + offset)
+      const body = await bodyForFacts(env, honest, { ...honest, nonce: (BigInt(honest.nonce) + offset).toString() })
       const r = await attestWith(env, session, body)
       return {
         ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         ...(detail ? { detail } : {}),
+      }
+    }
+
+    case 'doctored-facts': {
+      const honest = await factsFor(env, to, amount)
+      const { facts, lies } = doctorFacts(honest, s.factOverrides ?? {})
+      const r = await attestWith(env, session, await bodyForFacts(env, honest, facts))
+      return {
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        verdict: verdictOf(r.run.rawResponse),
+        notarizeTx: r.txHash,
+        detail: `the provider was asked about, and signed, ${lies.join('; ')}`,
+      }
+    }
+
+    case 'state-drift': {
+      const before = await env.wallet.provider!.getBalance(env.treasuryAddress)
+      const r = await attestWith(env, session, await gateBody(env, to, amount))
+      const delta = resolveAmount(s.drift ?? { og: '0.5' }, before)
+      const after = await env.depositToTreasury(delta)
+      if (after === before) {
+        return {
+          outcome: 'errored',
+          mechanism: 'setup',
+          fundsMoved: false,
+          detail: `the treasury did not move (${before} wei before and after), so there is no drift to test`,
+        }
+      }
+      return {
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        verdict: verdictOf(r.run.rawResponse),
+        notarizeTx: r.txHash,
+        detail: `the proof answers a treasury of ${ethers.formatEther(before)} 0G; ${ethers.formatEther(delta)} 0G was paid in before settling, leaving ${ethers.formatEther(after)} 0G`,
       }
     }
 
@@ -462,6 +570,40 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
 
 // ---------------------------------------------------------------- one scenario
 
+/**
+ * Settles the payments a scenario says came before it, so the history in its question is real.
+ *
+ * Each one goes the whole honest way round — question, inference, proof, notarization,
+ * settlement — because a history the gate did not actually record is not a history. If any of
+ * them fails to approve, this throws: the scenario's premise does not hold, and `runScenario`
+ * records it as `errored` rather than grading a question that says the recipient is a stranger.
+ */
+async function buildHistory(env: EvalEnv, s: Scenario, to: string): Promise<string> {
+  const answer = s.history!.answer ?? 'ALLOW:10'
+  let total = 0n
+  for (const spec of s.history!.payments) {
+    const session = await env.session(answer)
+    try {
+      const amount = resolveAmount(spec, await env.wallet.provider!.getBalance(env.treasuryAddress))
+      const r = await attestWith(env, session, await gateBody(env, to, amount))
+      const settled = await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)
+      if (settled.outcome !== 'approved') {
+        throw new Error(
+          `history: a prior payment of ${ethers.formatEther(amount)} 0G to ${to} did not settle (${settled.mechanism}), so this scenario has no payment history to be judged against`,
+        )
+      }
+      total += amount
+    } finally {
+      await session.close().catch(() => {})
+    }
+  }
+  const [payments, recorded] = (await env.treasury['recipientHistory']!(to)) as [bigint, bigint]
+  if (payments !== BigInt(s.history!.payments.length) || recorded !== total) {
+    throw new Error(`history: the gate recorded ${payments} payment(s) totalling ${recorded} wei, expected ${s.history!.payments.length} totalling ${total}`)
+  }
+  return `${payments} prior payment(s) totalling ${ethers.formatEther(total)} 0G were settled to this recipient first, and the gate reports them`
+}
+
 async function runScenario(env: EvalEnv, s: Scenario, treasuryTarget: bigint): Promise<Result> {
   const started = Date.now()
   const base = {
@@ -496,14 +638,22 @@ async function runScenario(env: EvalEnv, s: Scenario, treasuryTarget: bigint): P
     }
   }
 
-  const balance = await env.primeTreasury(treasuryTarget)
+  await env.primeTreasury(treasuryTarget)
   const to = resolveRecipient(s.recipient, env)
-  const amount = resolveAmount(s.amount, balance)
 
+  // Filled in below, but named out here so a failure while setting the scenario up is still
+  // reported against the transfer it was setting up.
+  let amount = 0n
   let session: Session | null = null
   try {
+    // Any prior payments come first, and they spend from the treasury, so the amount is
+    // resolved against the balance the graded transfer will actually face.
+    const history = s.history ? await buildHistory(env, s, to) : undefined
+    amount = resolveAmount(s.amount, await env.wallet.provider!.getBalance(env.treasuryAddress))
+
     session = await env.session(s.forkAnswer.content)
     const ran = await runProbe(env, s, session, to, amount)
+    const detail = [history, ran.detail].filter(Boolean).join('; ')
     const pass = grade(s.expected, ran.outcome)
     const predicted = s.expectRevert ?? []
     const mechanismMismatch =
@@ -522,7 +672,7 @@ async function runScenario(env: EvalEnv, s: Scenario, treasuryTarget: bigint): P
       ...(ran.writId ? { writId: ran.writId } : {}),
       ...(ran.notarizeTx ? { notarizeTx: ran.notarizeTx } : {}),
       ...(ran.settleTx ? { settleTx: ran.settleTx } : {}),
-      ...(ran.detail ? { detail: ran.detail } : {}),
+      ...(detail ? { detail } : {}),
       ms: Date.now() - started,
     }
   } catch (e) {

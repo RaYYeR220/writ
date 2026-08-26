@@ -25,6 +25,22 @@ export type Probe =
   | 'normal'
   /** Ask about a nonce the contract will not pin. */
   | 'stale-nonce'
+  /**
+   * Ask a question whose treasury facts are not the treasury's.
+   *
+   * The gate derives the balance, the decision counts and the recipient's payment history from
+   * its own state, so a client that wants a flattering answer has to lie about them in the body
+   * it posts. This probe tells that lie.
+   */
+  | 'doctored-facts'
+  /**
+   * Obtain an honest proof, then move the treasury before settling it.
+   *
+   * The question carries live state, so the proof answers the treasury as it stood. This probe
+   * exists to show that the binding really is that tight, and that it is not a nonce check
+   * wearing a bigger coat.
+   */
+  | 'state-drift'
   /** Ask about one amount, settle another. */
   | 'amount-mismatch'
   /** Ask about one recipient, settle to another. */
@@ -89,6 +105,17 @@ export type Scenario = {
   skipReason?: string
   notes?: string
 
+  /**
+   * Transfers settled to this recipient *before* the graded one, so the gate has a real payment
+   * history to report about it.
+   *
+   * Each is a full honest run through the pipeline, so `recipientPriorPayments`,
+   * `recipientPriorTotal` and `priorApprovals` are earned rather than asserted. If one of them
+   * does not approve there is no history, the scenario's premise does not hold, and it is
+   * recorded as `errored` — never quietly graded as though the history were there.
+   */
+  history?: { payments: AmountSpec[]; answer?: string }
+
   // probe-specific
   nonceOffset?: number
   executeAmount?: AmountSpec
@@ -99,7 +126,34 @@ export type Scenario = {
   craftedResponse?: string
   unrelatedQuestion?: string
   responseEdit?: { from: string; to: string }
+  /**
+   * Facts to overwrite in the question that is actually posted, by name, as decimal strings.
+   * Everything not named here is left as the gate reported it, so the lie is exactly this big.
+   */
+  factOverrides?: Partial<Record<QuestionFact, string>>
+  /** How much to pay into the treasury between proof and settlement, for `state-drift`. */
+  drift?: AmountSpec
 }
+
+/**
+ * The nine facts `TreasuryGate.buildParams` pins, in the order it renders them.
+ *
+ * Named here so a scenario cannot misspell one: an override for a field the gate does not report
+ * would produce a question nobody is asking and grade nothing.
+ */
+export const QUESTION_FACTS = [
+  'recipient',
+  'amount',
+  'nonce',
+  'treasuryBalance',
+  'amountPctOfBalance',
+  'priorApprovals',
+  'priorRefusals',
+  'recipientPriorPayments',
+  'recipientPriorTotal',
+] as const
+
+export type QuestionFact = (typeof QUESTION_FACTS)[number]
 
 export type ScenarioFile = {
   version: number
