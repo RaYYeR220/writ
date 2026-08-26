@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {PolicyGate} from "./PolicyGate.sol";
 import {WritRegistry} from "./WritRegistry.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -18,7 +19,18 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      signatures would brick the treasury permanently. See `lastAttestationAt` for exactly what
 ///      that delay measures — it is narrower than it sounds.
 contract TreasuryGate is PolicyGate, ReentrancyGuard {
+    /// @notice What this gate has already paid a given recipient.
+    /// @dev Packed into one slot: both fields are facts the pinned question reports, so recording
+    ///      a payment should cost one write rather than two.
+    struct RecipientHistory {
+        uint64 payments;
+        uint192 total;
+    }
+
     uint256 public constant POLICY_ID = 1;
+
+    /// @dev Ceiling on the reported percentage, so an absurd amount cannot stretch the prompt.
+    uint256 private constant PCT_CAP = 999;
 
     /// @notice How long this gate must go without a decision before the owner may sweep it.
     /// @dev Thirty days. Deliberately long: the hatch is a last resort for a treasury that would
@@ -58,6 +70,16 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
     ///      is the one thing this contract refuses to do anywhere else.
     uint64 public lastAttestationAt;
 
+    /// @notice How many transfers this gate has approved, and how many it has refused.
+    /// @dev Both are facts the pinned question reports. Declared next to `lastAttestationAt` so
+    ///      the three share one slot and settling a decision still writes a single slot.
+    uint96 public approvedCount;
+    uint96 public refusedCount;
+
+    /// @notice What this gate has paid each recipient so far.
+    /// @dev Updated only when funds actually move, so a refusal never reads as a payment.
+    mapping(address => RecipientHistory) public recipientHistory;
+
     error NotAgent(address caller);
     error NotOwner(address caller);
     error RecoveryNotYetAvailable(uint64 availableAt);
@@ -79,16 +101,95 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
 
     receive() external payable {}
 
-    /// @dev Built only from typed values, so no caller-supplied text reaches the question.
-    function buildParams(address to, uint256 amount, uint256 n) public pure returns (bytes memory) {
+    /// @notice The facts this contract pins into the question it asks about a transfer.
+    /// @dev Built only from typed values, so no caller-supplied text reaches the question, and
+    ///      only from this contract's own state and the action proposed — the recipient and the
+    ///      amount are the action itself; everything else the contract derives here and now. That
+    ///      is what the prompt-swap defence rests on: `execute` rebuilds this exact string, and a
+    ///      proof satisfies the gate only if the TEE signed the question containing it. A caller
+    ///      cannot understate the balance, hide a refusal history, or claim a recipient is a
+    ///      familiar one.
+    ///
+    ///      THE CONSEQUENCE, PLAINLY: because the treasury's live state is inside the question, an
+    ///      attestation is bound to the state at the moment the question was built. If the balance
+    ///      moves, another transfer settles, or this recipient is paid again before the proof is
+    ///      submitted, the question is no longer the same question and the old proof does not
+    ///      answer it. `execute` will revert rather than accept it, and the answer has to be
+    ///      obtained again. This is the discipline the nonce already imposes per action, widened
+    ///      to the treasury as a whole; it is a deliberate trade of convenience for the guarantee
+    ///      that the model judged the treasury as it actually stood.
+    ///
+    ///      Amounts are in wei. `amountPctOfBalance` is the amount as a percentage of the balance
+    ///      *before* the transfer, so a value over 100 means the treasury cannot cover it.
+    function buildParams(address to, uint256 amount) public view virtual returns (bytes memory) {
+        // Split in two only because one `encodePacked` over all nine fields is stack-too-deep.
+        return bytes.concat(_proposedTransfer(to, amount), _treasuryHistory(to));
+    }
+
+    /// @dev What is being asked, and how big it is relative to what the treasury holds.
+    function _proposedTransfer(address to, uint256 amount) private view returns (bytes memory) {
+        uint256 bal = address(this).balance;
         return abi.encodePacked(
-            "recipient=", Strings.toHexString(to), " amount=", Strings.toString(amount), " nonce=", Strings.toString(n)
+            "recipient=",
+            Strings.toHexString(to),
+            " amount=",
+            Strings.toString(amount),
+            " nonce=",
+            Strings.toString(nonce),
+            " treasuryBalance=",
+            Strings.toString(bal),
+            " amountPctOfBalance=",
+            Strings.toString(_percentOfBalance(amount, bal))
+        );
+    }
+
+    /// @dev What this treasury has done before, in general and with this recipient.
+    function _treasuryHistory(address to) private view returns (bytes memory) {
+        RecipientHistory memory h = recipientHistory[to];
+        return abi.encodePacked(
+            " priorApprovals=",
+            Strings.toString(approvedCount),
+            " priorRefusals=",
+            Strings.toString(refusedCount),
+            " recipientPriorPayments=",
+            Strings.toString(h.payments),
+            " recipientPriorTotal=",
+            Strings.toString(h.total)
         );
     }
 
     /// @notice The exact bytes to post to the 0G Compute provider for the next transfer.
+    /// @dev Post these bytes verbatim. They embed the treasury's state as of this call, so if the
+    ///      treasury moves before you submit the proof, call this again and re-ask the model.
     function previewRequestBody(address to, uint256 amount) external view returns (bytes memory) {
-        return buildRequestBody(POLICY_ID, buildParams(to, amount, nonce));
+        return buildRequestBody(POLICY_ID, buildParams(to, amount));
+    }
+
+    /// @dev The most useful number in the question: it turns two 18-decimal integers a model reads
+    ///      badly into one small one it reads well. Total by construction — an empty treasury
+    ///      reports the cap rather than dividing by zero, and `mulDiv` carries the 512-bit
+    ///      intermediate so a large amount cannot overflow the multiplication.
+    function _percentOfBalance(uint256 amount, uint256 bal) private pure returns (uint256) {
+        if (amount == 0) return 0;
+        if (bal == 0) return PCT_CAP;
+        uint256 pct = Math.mulDiv(amount, 100, bal);
+        return pct > PCT_CAP ? PCT_CAP : pct;
+    }
+
+    /// @dev Reached only when funds actually move.
+    function _recordPayment(address to, uint256 amount) private {
+        RecipientHistory storage h = recipientHistory[to];
+        unchecked {
+            // 2^64 payments out of one gate is not reachable.
+            h.payments += 1;
+
+            // Saturating rather than reverting. This is a fact for a prompt, not a ledger, and a
+            // treasury that had somehow accumulated 192 bits of payments to one address should
+            // not lose the transfer in front of it over an arithmetic edge.
+            uint256 total = uint256(h.total) + amount;
+            // forge-lint: disable-next-line(unsafe-typecast)
+            h.total = (total < amount || total > type(uint192).max) ? type(uint192).max : uint192(total);
+        }
     }
 
     /// @notice Move funds, but only against an attested ALLOW for this exact action.
@@ -111,7 +212,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         if (msg.sender != agent) revert NotAgent(msg.sender);
         if (to == address(0)) revert ZeroRecipient();
 
-        bytes memory params = buildParams(to, amount, nonce);
+        bytes memory params = buildParams(to, amount);
         return _settle(to, amount, _consume(POLICY_ID, params, rawResponse, provider, signature, transcriptRoot));
     }
 
@@ -131,7 +232,7 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         if (msg.sender != agent) revert NotAgent(msg.sender);
         if (to == address(0)) revert ZeroRecipient();
 
-        bytes memory params = buildParams(to, amount, nonce);
+        bytes memory params = buildParams(to, amount);
         return _settle(
             to,
             amount,
@@ -153,10 +254,17 @@ contract TreasuryGate is PolicyGate, ReentrancyGuard {
         }
 
         if (d.refusedBy != Refusal.None) {
+            unchecked {
+                ++refusedCount;
+            }
             emit TransferRefused(to, amount, d.risk, d.refusedBy, d.id);
             return false;
         }
 
+        unchecked {
+            ++approvedCount;
+        }
+        _recordPayment(to, amount);
         emit TransferApproved(to, amount, d.risk, d.id);
 
         (bool ok,) = to.call{value: amount}("");

@@ -311,12 +311,128 @@ contract AgentTreasuryTest is Test {
         treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
     }
 
-    function test_paramsBindRecipientAmountAndNonce() public view {
-        bytes memory a = treasury.buildParams(dest, 1 ether, 0);
-        bytes memory b = treasury.buildParams(dest, 1 ether, 1);
-        bytes memory c = treasury.buildParams(address(0xFF), 1 ether, 0);
-        assertTrue(keccak256(a) != keccak256(b));
-        assertTrue(keccak256(a) != keccak256(c));
+    /// The question the contract pins carries facts it derived itself, so the model has
+    /// something to reason about and none of it is the caller's to choose.
+    function test_questionCarriesTheTreasuryFacts() public view {
+        assertEq(
+            string(treasury.buildParams(dest, 1 ether)),
+            "recipient=0x00000000000000000000000000000000000000d1 amount=1000000000000000000 nonce=0"
+            " treasuryBalance=10000000000000000000 amountPctOfBalance=10"
+            " priorApprovals=0 priorRefusals=0 recipientPriorPayments=0 recipientPriorTotal=0"
+        );
+    }
+
+    function test_previewRequestBodyCarriesTheSameFacts() public view {
+        bytes memory body = treasury.previewRequestBody(dest, 1 ether);
+        bytes memory params = treasury.buildParams(dest, 1 ether);
+        assertEq(keccak256(treasury.buildRequestBody(treasury.POLICY_ID(), params)), keccak256(body));
+    }
+
+    function test_questionBindsRecipientAndAmount() public view {
+        bytes32 a = keccak256(treasury.buildParams(dest, 1 ether));
+        assertTrue(a != keccak256(treasury.buildParams(dest, 2 ether)));
+        assertTrue(a != keccak256(treasury.buildParams(address(0xFF), 1 ether)));
+    }
+
+    /// Every derived fact is inside the hash, so moving any one of them moves the question.
+    function test_questionChangesWhenTheBalanceChanges() public {
+        bytes32 before = keccak256(treasury.buildParams(dest, 1 ether));
+        vm.deal(address(treasury), 20 ether);
+        assertTrue(keccak256(treasury.buildParams(dest, 1 ether)) != before);
+    }
+
+    function test_questionChangesWithTheNonce() public {
+        bytes32 before = keccak256(treasury.buildParams(dest, 1 ether));
+        _approve(dest, 1 ether);
+        assertEq(treasury.nonce(), 1);
+        assertTrue(keccak256(treasury.buildParams(dest, 1 ether)) != before);
+    }
+
+    function test_questionChangesWithApprovalAndRefusalHistory() public {
+        _approve(dest, 1 ether);
+        assertEq(treasury.approvedCount(), 1);
+        assertEq(treasury.refusedCount(), 0);
+
+        bytes32 afterApproval = keccak256(treasury.buildParams(dest, 1 ether));
+        _refuse(dest, 1 ether);
+        assertEq(treasury.approvedCount(), 1);
+        assertEq(treasury.refusedCount(), 1);
+        assertTrue(keccak256(treasury.buildParams(dest, 1 ether)) != afterApproval);
+    }
+
+    function test_questionChangesWithRecipientHistory() public {
+        _approve(dest, 1 ether);
+        (uint64 payments, uint192 total) = treasury.recipientHistory(dest);
+        assertEq(payments, 1);
+        assertEq(total, 1 ether);
+
+        // A recipient never paid before must read differently from one that has.
+        address payable fresh = payable(address(0xF1));
+        assertTrue(_factsFor(fresh, 1 ether) != _factsFor(dest, 1 ether));
+    }
+
+    /// A refusal moves no money, so it must not show up as a payment to the recipient.
+    function test_refusalDoesNotTouchRecipientHistory() public {
+        _refuse(dest, 9 ether);
+        (uint64 payments, uint192 total) = treasury.recipientHistory(dest);
+        assertEq(payments, 0);
+        assertEq(total, 0);
+    }
+
+    /// The signal that catches a transfer larger than the treasury holds, before it is attempted.
+    function test_questionFlagsAnAmountAboveTheBalance() public view {
+        assertEq(
+            string(treasury.buildParams(dest, 50 ether)),
+            "recipient=0x00000000000000000000000000000000000000d1 amount=50000000000000000000 nonce=0"
+            " treasuryBalance=10000000000000000000 amountPctOfBalance=500"
+            " priorApprovals=0 priorRefusals=0 recipientPriorPayments=0 recipientPriorTotal=0"
+        );
+    }
+
+    /// The percentage is capped so a wild amount cannot stretch the prompt, and an empty
+    /// treasury reports the cap rather than dividing by zero.
+    function test_percentIsCappedAndSurvivesAnEmptyTreasury() public {
+        assertTrue(_contains(treasury.buildParams(dest, 1_000_000 ether), "amountPctOfBalance=999"));
+
+        vm.deal(address(treasury), 0);
+        assertTrue(_contains(treasury.buildParams(dest, 1 ether), "amountPctOfBalance=999"));
+        assertTrue(_contains(treasury.buildParams(dest, 0), "amountPctOfBalance=0"));
+    }
+
+    function _factsFor(address to, uint256 amount) internal view returns (bytes32) {
+        return keccak256(treasury.buildParams(to, amount));
+    }
+
+    function _approve(address payable to, uint256 amount) internal {
+        bytes memory req = treasury.previewRequestBody(to, amount);
+        bytes memory resp = _respBody("ALLOW:12");
+        bytes memory sig = _sign(req, resp);
+        vm.prank(agent);
+        treasury.execute(to, amount, resp, PROVIDER, sig, bytes32(0));
+    }
+
+    function _refuse(address payable to, uint256 amount) internal {
+        bytes memory req = treasury.previewRequestBody(to, amount);
+        bytes memory resp = _respBody("DENY:91");
+        bytes memory sig = _sign(req, resp);
+        vm.prank(agent);
+        treasury.execute(to, amount, resp, PROVIDER, sig, bytes32(0));
+    }
+
+    function _contains(bytes memory haystack, string memory needle) internal pure returns (bool) {
+        bytes memory n = bytes(needle);
+        if (n.length > haystack.length) return false;
+        for (uint256 i = 0; i <= haystack.length - n.length; ++i) {
+            bool hit = true;
+            for (uint256 j = 0; j < n.length; ++j) {
+                if (haystack[i + j] != n[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) return true;
+        }
+        return false;
     }
 
     function test_recordsApprovalAndRefusesSecondUseOfSameWrit() public {
