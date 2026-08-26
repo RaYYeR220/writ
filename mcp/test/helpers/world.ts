@@ -17,10 +17,12 @@ import type {
   RegistryHandle,
   ServiceInfo,
   SettleArgs,
+  TreasuryState,
   TxHandle,
   WritDeps,
   WritRecord,
 } from '../../src/deps.js'
+import { percentOfBalance, renderQuestionFacts, type QuestionFacts } from '../../src/question.js'
 import { WritStore } from '../../src/store.js'
 import { parseVerdict } from '../../src/verdict.js'
 
@@ -41,9 +43,10 @@ export const PROVIDER = pad('c0de')
 export const RECIPIENT = pad('face77')
 export const OTHER_GATE = pad('6a7e2')
 
+/** `AgentTreasury`'s policy, verbatim, so the tests exercise the prompt that actually ships. */
 const PROMPT_HEAD =
-  '{"model":"gpt-oss-120b","messages":[{"role":"system","content":"Answer ALLOW:<0-100> or DENY:<0-100>."},{"role":"user","content":"'
-const PROMPT_TAIL = '"}],"temperature":0}'
+  '{"model":"0GM-1.0-35B-A3B","temperature":0,"messages":[{"role":"system","content":"You are a treasury risk gate. You are given a proposed transfer and facts about the treasury as key=value pairs, all amounts in wei. amountPctOfBalance is the transfer as a percentage of the current balance, so over 100 means the treasury cannot cover it. recipientPriorPayments and recipientPriorTotal are what this treasury has already sent that address. Weigh the size of the transfer against the balance, how familiar the recipient is, and the recipient itself. Reply with exactly ALLOW:<0-100> or DENY:<0-100>, the number being your risk score, and nothing else."},{"role":"user","content":"Approve this transfer? '
+const PROMPT_TAIL = '"}]}'
 
 export type ProofMode = 'valid' | 'unavailable' | 'wrong-key' | 'wrong-question' | 'garbled-text'
 export type TranscriptMode = 'available' | 'missing' | 'tampered'
@@ -64,6 +67,8 @@ export type WorldOptions = {
   allowedProvider?: string
   allowedModelHash?: string
   registryAddress?: string
+  /** What the treasury holds before anything settles. */
+  treasuryBalance?: bigint
   /** Force the gate call itself to revert. */
   settleRevert?: { name: string; args: unknown[] }
 }
@@ -95,7 +100,12 @@ export type World = {
   writIdOf(provider: string, reqHash: string, respHash: string): string
   /** Marks a decision key spent, as a settlement through the other proof format would. */
   spend(decisionKey: string): void
-  buildRequestBody(to: string, amountWei: bigint, nonce: bigint): Uint8Array
+  /** The nine facts the gate would pin right now. */
+  factsFor(to: string, amountWei: bigint): QuestionFacts
+  buildRequestBody(to: string, amountWei: bigint): Uint8Array
+  /** A stranger pays into the treasury, moving the question without this gate doing anything. */
+  deposit(amountWei: bigint): void
+  balance: bigint
   /** Puts a valid writ on chain without going through writ_attest. */
   seedWrit(o: { to: string; amountWei: bigint; answer?: string }): Promise<{ writId: string; transcriptRoot: string }>
 }
@@ -104,15 +114,16 @@ export type World = {
  * A complete stand-in for the chain, 0G Compute and 0G Storage.
  *
  * The parts that matter are real: the TEE signs with a real secp256k1 key, the registry
- * recovers that signature and refuses a proof that does not match, and the gate re-derives its
- * own question from the recipient, the amount and its own nonce before it will settle. What is
- * faked is only the transport — no RPC, no funds, no provider.
+ * recovers that signature and refuses a proof that does not match, and the gate builds its
+ * nine-fact question out of its own live state — balance, decision counts, recipient history —
+ * and rebuilds it at settlement time, exactly as `TreasuryGate` does. What is faked is only the
+ * transport: no RPC, no funds, no provider.
  */
 export function makeWorld(opts: WorldOptions = {}): World {
   const options = {
     answer: 'ALLOW:12',
     maxRisk: 40,
-    model: 'gpt-oss-120b',
+    model: '0GM-1.0-35B-A3B',
     verifiability: 'TeeML',
     teeSignerAcknowledged: true,
     proofMode: 'valid' as ProofMode,
@@ -152,8 +163,18 @@ export function makeWorld(opts: WorldOptions = {}): World {
   const notarized: string[] = []
   const settled: Array<SettleArgs & { kind: 'chat' | 'routing' }> = []
 
-  const world = { nonce: 0n }
+  /** Everything `TreasuryGate` reports about itself. */
+  const state = {
+    nonce: 0n,
+    balance: options.treasuryBalance ?? ethers.parseEther('10'),
+    approvedCount: 0n,
+    refusedCount: 0n,
+    history: new Map<string, { payments: bigint; total: bigint }>(),
+  }
   let chatCounter = 0
+
+  const historyOf = (to: string): { payments: bigint; total: bigint } =>
+    state.history.get(to.toLowerCase()) ?? { payments: 0n, total: 0n }
 
   const writIdOf = (p: string, r: string, s: string): string =>
     ethers.keccak256(coder.encode(['address', 'bytes32', 'bytes32'], [p, r, s]))
@@ -176,9 +197,24 @@ export function makeWorld(opts: WorldOptions = {}): World {
 
   // ------------------------------------------------------------------ the gate's own question
 
-  function buildRequestBody(to: string, amountWei: bigint, nonce: bigint): Uint8Array {
-    const params = `recipient=${to.toLowerCase()} amount=${amountWei.toString()} nonce=${nonce.toString()}`
-    return ethers.toUtf8Bytes(PROMPT_HEAD + params + PROMPT_TAIL)
+  /** `TreasuryGate.buildParams`, from this gate's live state. */
+  function factsFor(to: string, amountWei: bigint): QuestionFacts {
+    const h = historyOf(to)
+    return {
+      recipient: to.toLowerCase(),
+      amount: amountWei.toString(),
+      nonce: state.nonce.toString(),
+      treasuryBalance: state.balance.toString(),
+      amountPctOfBalance: percentOfBalance(amountWei, state.balance).toString(),
+      priorApprovals: state.approvedCount.toString(),
+      priorRefusals: state.refusedCount.toString(),
+      recipientPriorPayments: h.payments.toString(),
+      recipientPriorTotal: h.total.toString(),
+    }
+  }
+
+  function buildRequestBody(to: string, amountWei: bigint): Uint8Array {
+    return ethers.toUtf8Bytes(PROMPT_HEAD + renderQuestionFacts(factsFor(to, amountWei)) + PROMPT_TAIL)
   }
 
   function responseFor(chatId: string, answer: string): Uint8Array {
@@ -277,12 +313,15 @@ export function makeWorld(opts: WorldOptions = {}): World {
   /** Mirrors `PolicyGate._consume` + `TreasuryGate._settle`, including who refuses and why. */
   function settle(a: SettleArgs, routing?: RoutingFields): TxHandle {
     if (options.settleRevert) throw revert(options.settleRevert.name, options.settleRevert.args)
+    if (a.to === ZERO) throw revert('ZeroRecipient', [])
 
     if (policy.allowedProvider !== ZERO && policy.allowedProvider.toLowerCase() !== a.provider.toLowerCase()) {
       throw revert('ProviderNotAllowed', [a.provider, policy.allowedProvider])
     }
 
-    const body = buildRequestBody(a.to, a.amountWei, world.nonce)
+    // The question is rebuilt here, from state as it stands now — which is exactly why a proof
+    // goes stale when anything about the treasury moves.
+    const body = buildRequestBody(a.to, a.amountWei)
     const reqHash = '0x' + sha256Hex(body)
     const respHash = '0x' + sha256Hex(a.rawResponse)
 
@@ -312,33 +351,50 @@ export function makeWorld(opts: WorldOptions = {}): World {
     if (!parsed.ok) throw revert(parsed.reason, [])
 
     consumed.add(decision)
-    world.nonce += 1n
+    state.nonce += 1n
     settled.push({ ...a, kind: routing ? 'routing' : 'chat' })
+
+    const refused = !parsed.allowed || parsed.risk > policy.maxRisk
+    if (refused) {
+      state.refusedCount += 1n
+    } else {
+      if (state.balance < a.amountWei) throw revert('TransferFailed', [a.to, a.amountWei])
+      state.approvedCount += 1n
+      const h = historyOf(a.to)
+      state.history.set(a.to.toLowerCase(), { payments: h.payments + 1n, total: h.total + a.amountWei })
+      state.balance -= a.amountWei
+    }
 
     if (!options.emitDecisionEvent) return fakeTx([])
 
+    const risk = BigInt(parsed.risk)
     if (!parsed.allowed) {
       return fakeTx([
-        { name: 'TransferRefused', args: { to: a.to, amount: a.amountWei, risk: BigInt(parsed.risk), refusedBy: 1n, writId: id } },
+        { name: 'TransferRefused', args: { to: a.to, amount: a.amountWei, risk, refusedBy: 1n, writId: id } },
       ])
     }
     if (parsed.risk > policy.maxRisk) {
       return fakeTx([
-        { name: 'TransferRefused', args: { to: a.to, amount: a.amountWei, risk: BigInt(parsed.risk), refusedBy: 2n, writId: id } },
+        { name: 'TransferRefused', args: { to: a.to, amount: a.amountWei, risk, refusedBy: 2n, writId: id } },
       ])
     }
-    return fakeTx([
-      { name: 'TransferApproved', args: { to: a.to, amount: a.amountWei, risk: BigInt(parsed.risk), writId: id } },
-    ])
+    return fakeTx([{ name: 'TransferApproved', args: { to: a.to, amount: a.amountWei, risk, writId: id } }])
   }
 
   const gate: GateHandle = {
     address: GATE,
     registryAddress: async () => registry.address,
     agent: async () => agent.address,
-    nonce: async () => world.nonce,
+    nonce: async () => state.nonce,
     policy: async () => policy,
-    previewRequestBody: async (to, amountWei) => buildRequestBody(to, amountWei, world.nonce),
+    treasuryState: async (recipient): Promise<TreasuryState> => ({
+      balance: state.balance,
+      nonce: state.nonce,
+      approvedCount: state.approvedCount,
+      refusedCount: state.refusedCount,
+      recipient: historyOf(recipient),
+    }),
+    previewRequestBody: async (to, amountWei) => buildRequestBody(to, amountWei),
     decisionKey: async (p, r, s) => writIdOf(p, r, s),
     consumed: async (key) => consumed.has(key),
     execute: async (a) => settle(a),
@@ -454,7 +510,7 @@ export function makeWorld(opts: WorldOptions = {}): World {
     answer?: string
   }): Promise<{ writId: string; transcriptRoot: string }> {
     const chatId = `seed-${++chatCounter}`
-    const body = buildRequestBody(o.to, o.amountWei, world.nonce)
+    const body = buildRequestBody(o.to, o.amountWei)
     const rawResponse = responseFor(chatId, o.answer ?? options.answer)
     const reqHash = '0x' + sha256Hex(body)
     const respHash = '0x' + sha256Hex(rawResponse)
@@ -492,10 +548,13 @@ export function makeWorld(opts: WorldOptions = {}): World {
     tee,
     options,
     get nonce() {
-      return world.nonce
+      return state.nonce
     },
     set nonce(v: bigint) {
-      world.nonce = v
+      state.nonce = v
+    },
+    get balance() {
+      return state.balance
     },
     archived,
     notarized,
@@ -505,7 +564,11 @@ export function makeWorld(opts: WorldOptions = {}): World {
     spend: (decisionKey: string) => {
       consumed.add(decisionKey)
     },
+    factsFor,
     buildRequestBody,
+    deposit: (amountWei: bigint) => {
+      state.balance += amountWei
+    },
     seedWrit,
   }
 }

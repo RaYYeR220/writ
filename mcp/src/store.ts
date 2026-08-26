@@ -16,6 +16,8 @@ export type StoredWrit = {
   provider: string
   reqHash: string
   respHash: string
+  /** The exact question the TEE signed, kept so a stale-state failure can name what moved. */
+  rawRequest: Uint8Array
   rawResponse: Uint8Array
   signature: string
   transcriptRoot: string

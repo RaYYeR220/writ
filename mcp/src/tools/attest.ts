@@ -75,7 +75,9 @@ export function registerAttest(server: McpServer, deps: WritDeps): void {
         'TEE signature over the exact request and response bytes, verifies it against the ' +
         "provider's registered TEE signer, archives the transcript to 0G Storage and notarizes " +
         'the proof on chain. Returns the writ id and the verdict. Spends gas and compute ' +
-        'credit. Fails loudly rather than returning an unverified answer.',
+        'credit. Fails loudly rather than returning an unverified answer. The question includes ' +
+        'the treasury’s live state, so settle promptly: the resulting writ expires as soon as ' +
+        'the balance or the decision history moves. Call writ_execute next.',
       inputSchema,
       outputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -137,6 +139,7 @@ export function registerAttest(server: McpServer, deps: WritDeps): void {
           provider,
           reqHash: result.run.reqHash,
           respHash: result.run.respHash,
+          rawRequest: result.run.rawRequest,
           rawResponse: result.run.rawResponse,
           signature: result.signature,
           transcriptRoot: result.transcriptRoot,

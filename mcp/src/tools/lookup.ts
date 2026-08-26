@@ -3,6 +3,7 @@ import { keccak256, toUtf8Bytes } from 'ethers'
 import * as z from 'zod/v4'
 import type { WritDeps } from '../deps.js'
 import { fail, runTool } from '../errors.js'
+import { factNotes, parseQuestionFacts, reportFacts } from '../question.js'
 import { verifyArchivedTranscript } from '../rehydrate.js'
 import { parseVerdict } from '../verdict.js'
 import { addressField, bytes32Field } from './shared.js'
@@ -55,6 +56,25 @@ const outputSchema = {
   chatId: z.string(),
   capturedAt: z.string(),
   question: z.string().describe('The exact request bytes, as archived.'),
+  facts: z
+    .object({
+      recipient: z.string(),
+      amount: z.string(),
+      amountOg: z.string(),
+      nonce: z.string(),
+      treasuryBalance: z.string().describe('What the treasury held when the question was asked.'),
+      treasuryBalanceOg: z.string(),
+      amountPctOfBalance: z.number().int(),
+      priorApprovals: z.string(),
+      priorRefusals: z.string(),
+      recipientPriorPayments: z.string(),
+      recipientPriorTotal: z.string(),
+      recipientPriorTotalOg: z.string(),
+      treasuryCoversAmount: z.boolean(),
+      recipientIsNew: z.boolean(),
+    })
+    .nullable()
+    .describe('The nine facts this question pinned, as they stood then. Null for a non-TreasuryGate question.'),
   answer: z.string().describe('The exact response bytes, as archived.'),
   verdict: z.enum(['ALLOW', 'DENY', 'UNPARSEABLE']),
   risk: z.number().int().min(0).max(100).nullable(),
@@ -175,6 +195,16 @@ export function registerLookup(server: McpServer, deps: WritDeps): void {
         const answer = clip(new TextDecoder().decode(verified.rawResponse))
         if (question.clipped || answer.clipped) notes.push('question or answer was truncated for display')
 
+        // Parsed from the archived bytes, so these are the facts as they stood when the model
+        // was asked — not as the treasury stands today.
+        const facts = parseQuestionFacts(verified.rawRequest)
+        if (facts) {
+          notes.push(...factNotes(facts))
+          notes.push(
+            'these facts are the treasury as it stood when the question was asked; the gate has almost certainly moved since',
+          )
+        }
+
         return {
           writId,
           registry: reg.address,
@@ -208,6 +238,7 @@ export function registerLookup(server: McpServer, deps: WritDeps): void {
           chatId: verified.chatId,
           capturedAt: verified.capturedAt,
           question: question.text,
+          facts: facts ? reportFacts(facts) : null,
           answer: answer.text,
           verdict: parsed.ok ? (parsed.allowed ? ('ALLOW' as const) : ('DENY' as const)) : ('UNPARSEABLE' as const),
           risk: parsed.ok ? parsed.risk : null,

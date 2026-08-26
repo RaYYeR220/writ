@@ -1,9 +1,10 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { getAddress } from 'ethers'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import * as z from 'zod/v4'
 import { refusalName, sha256Hex, type RoutingFields } from '@writ/sdk'
-import type { DecodedEvent, GateHandle, SettleArgs, WritDeps } from '../deps.js'
+import type { DecodedEvent, GateHandle, SettleArgs, TxReceiptLike, WritDeps } from '../deps.js'
 import { fail, runTool } from '../errors.js'
+import { diffFacts, explainDrift, parseQuestionFacts } from '../question.js'
 import { verifyArchivedTranscript } from '../rehydrate.js'
 import { addressField, amountOut, bytes32Field, explorerTx } from './shared.js'
 
@@ -40,26 +41,26 @@ type Material = SettleArgs & {
   routing?: RoutingFields
   reqHash: string
   respHash: string
+  /** The exact question the TEE signed, so a stale-state failure can name what moved. */
+  rawRequest: Uint8Array
   source: 'session' | 'reconstructed'
 }
-
-const PARAMS = /recipient=(0x[0-9a-fA-F]{40}) amount=(\d+) nonce=(\d+)/
 
 /**
  * Recovers the recipient and amount from the question the TEE actually signed.
  *
- * These values are not on chain — only the hash of the question is — so they have to come out
- * of the archived request body. The parse is never trusted on its own: the caller re-asks the
- * gate to build the same question from them and compares the hash.
+ * These two are not on chain — only the hash of the whole question is — so they have to come out
+ * of the archived request body. The parse is anchored at both ends and is never trusted on its
+ * own: the caller re-asks the gate to build the same question from them and compares the hash.
  */
 function paramsFromRequest(rawRequest: Uint8Array): { to: string; amountWei: bigint } {
-  const m = PARAMS.exec(new TextDecoder().decode(rawRequest))
-  if (!m) {
+  const facts = parseQuestionFacts(rawRequest)
+  if (!facts) {
     fail(
-      'could not find the recipient and amount in the archived question; this writ does not answer a TreasuryGate transfer',
+      'could not read the nine TreasuryGate facts out of the archived question; this writ does not answer a TreasuryGate transfer',
     )
   }
-  return { to: getAddress(m[1]!), amountWei: BigInt(m[2]!) }
+  return { to: getAddress(facts.recipient), amountWei: BigInt(facts.amount) }
 }
 
 /**
@@ -74,9 +75,7 @@ async function reconstruct(deps: WritDeps, gate: GateHandle, writId: string): Pr
   const registry = deps.registry(await gate.registryAddress())
   const w = await registry.getWrit(writId)
 
-  const routing = (await registry.isRoutingProof(writId))
-    ? await registry.getRoutingProof(writId)
-    : undefined
+  const routing = (await registry.isRoutingProof(writId)) ? await registry.getRoutingProof(writId) : undefined
 
   if (/^0x0{64}$/i.test(w.transcriptRoot)) {
     fail(
@@ -97,6 +96,7 @@ async function reconstruct(deps: WritDeps, gate: GateHandle, writId: string): Pr
     writId,
     to,
     amountWei,
+    rawRequest: verified.rawRequest,
     rawResponse: verified.rawResponse,
     provider: w.provider,
     signature: verified.signature,
@@ -109,20 +109,47 @@ async function reconstruct(deps: WritDeps, gate: GateHandle, writId: string): Pr
   }
 }
 
+const REMEDY =
+  'Ask the question again: run writ_preview_question and writ_attest against the current state. Re-submitting this writ cannot work, because the proof answers a question the gate no longer asks.'
+
 /**
- * Confirms the gate would ask exactly this question, right now.
+ * Compares the question this writ answers with the question the gate would ask right now.
  *
- * The gate rebuilds its question from the recipient, the amount and its own current nonce, so a
- * proof that answered an earlier nonce cannot settle. Checking here turns a wasted revert into
- * a readable explanation.
+ * Returns null when they are the same, and otherwise the reason they are not, in words.
+ *
+ * This is the failure mode the nine-fact question introduced, and it deserves a straight answer
+ * rather than a revert. The question pins the treasury's live state, so a stranger depositing
+ * into the treasury between attesting and settling invalidates a perfectly good approval —
+ * nothing is wrong with the proof, it simply answers a question about a treasury that no longer
+ * exists in that state.
  */
-async function assertQuestionStillPinned(gate: GateHandle, m: Material): Promise<void> {
+async function driftAgainst(gate: GateHandle, m: Material): Promise<string | null> {
   const body = await gate.previewRequestBody(m.to, m.amountWei)
   const rebuilt = '0x' + sha256Hex(body)
-  if (rebuilt.toLowerCase() !== m.reqHash.toLowerCase()) {
-    fail(
-      `gate ${gate.address} would now ask a different question than this writ answers (it pins ${m.reqHash}, the gate builds ${rebuilt}); the nonce has moved on or this writ belongs to another gate`,
-    )
+  if (rebuilt.toLowerCase() === m.reqHash.toLowerCase()) return null
+
+  const before = parseQuestionFacts(m.rawRequest)
+  const after = parseQuestionFacts(body)
+
+  if (before && after) {
+    const changes = diffFacts(before, after)
+    if (changes.length > 0) {
+      return `this writ no longer answers gate ${gate.address}'s question: ${explainDrift(changes)} ${REMEDY}`
+    }
+  }
+
+  return (
+    `gate ${gate.address} would now ask a different question than this writ answers ` +
+    `(the writ pins ${m.reqHash}, the gate builds ${rebuilt}). ${REMEDY}`
+  )
+}
+
+/** `driftAgainst`, for use after a failure, where a second failure must not mask the first. */
+async function driftQuietly(gate: GateHandle, m: Material): Promise<string | null> {
+  try {
+    return await driftAgainst(gate, m)
+  } catch {
+    return null
   }
 }
 
@@ -155,7 +182,10 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
         'Calls the gate to act on a writ produced by writ_attest. Returns the transaction hash ' +
         'and the outcome: approved, or refused with who refused — "model" when the model ' +
         'answered DENY, "policy" when it answered ALLOW above the gate’s risk ceiling. A ' +
-        'refusal is a successful result, not an error. Sends a transaction.',
+        'refusal is a successful result, not an error. Sends a transaction. Because the gate’s ' +
+        'question pins the treasury’s live state, a writ expires as soon as that state moves — ' +
+        'including a deposit by an unrelated stranger; this tool detects that and tells you to ' +
+        're-attest rather than retry.',
       inputSchema,
       outputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -175,7 +205,6 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
         }
 
         const held = deps.store.get(writId)
-
         if (held && held.gate.toLowerCase() !== g.address.toLowerCase()) {
           fail(`writ ${writId} was attested against gate ${held.gate}, not ${g.address}`)
         }
@@ -185,6 +214,7 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
               writId: held.writId,
               to: held.to,
               amountWei: held.amountWei,
+              rawRequest: held.rawRequest,
               rawResponse: held.rawResponse,
               provider: held.provider,
               signature: held.signature,
@@ -197,7 +227,8 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
             }
           : await reconstruct(deps, g, writId)
 
-        await assertQuestionStillPinned(g, material)
+        const stale = await driftAgainst(g, material)
+        if (stale) fail(stale)
 
         const key = await g.decisionKey(material.provider, material.reqHash, material.respHash)
         if (await g.consumed(key)) {
@@ -215,17 +246,34 @@ export function registerExecute(server: McpServer, deps: WritDeps): void {
           transcriptRoot: material.transcriptRoot,
         }
 
-        const tx =
-          material.kind === 'routing'
-            ? await g.executeRoutingProof({
-                ...args,
-                routing: material.routing ?? fail('a routing proof arrived without its routing fields'),
-              })
-            : await g.execute(args)
+        let receipt: TxReceiptLike | null
+        try {
+          const tx =
+            material.kind === 'routing'
+              ? await g.executeRoutingProof({
+                  ...args,
+                  routing: material.routing ?? fail('a routing proof arrived without its routing fields'),
+                })
+              : await g.execute(args)
+          receipt = await tx.wait()
+        } catch (err) {
+          // The treasury can move between the check above and the transaction landing, and the
+          // gate rebuilds its question at execution time — so a revert here is very often a
+          // question that went stale in the last few seconds. Say so if that is what happened.
+          const raced = await driftQuietly(g, material)
+          if (raced) fail(`the settlement reverted because ${raced}`)
+          throw err
+        }
 
-        const receipt = await tx.wait()
-        if (!receipt) fail(`settlement ${tx.hash} produced no receipt; the outcome is unknown`)
-        if (receipt.status !== 1) fail(`settlement ${receipt.hash} reverted; nothing was settled`)
+        if (!receipt) fail(`settlement produced no receipt; the outcome is unknown`)
+        if (receipt.status !== 1) {
+          const raced = await driftQuietly(g, material)
+          fail(
+            raced
+              ? `settlement ${receipt.hash} reverted because ${raced}`
+              : `settlement ${receipt.hash} reverted; nothing was settled`,
+          )
+        }
 
         const event = decisionFrom(g, receipt.logs)
         if (!event) {

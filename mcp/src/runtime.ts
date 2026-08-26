@@ -132,6 +132,22 @@ export function createLiveDeps(cfg: WritConfig): WritDeps {
           maxRisk: Number(p.maxRisk),
         }
       },
+      treasuryState: async (recipient) => {
+        const [balance, nonce, approvedCount, refusedCount, history] = await Promise.all([
+          rpc().getBalance(at),
+          call<bigint>('nonce'),
+          call<bigint>('approvedCount'),
+          call<bigint>('refusedCount'),
+          call<[bigint, bigint]>('recipientHistory', recipient),
+        ])
+        return {
+          balance,
+          nonce,
+          approvedCount,
+          refusedCount,
+          recipient: { payments: history[0], total: history[1] },
+        }
+      },
       previewRequestBody: async (to, amountWei) =>
         ethers.getBytes(await call<string>('previewRequestBody', to, amountWei)),
       decisionKey: (p, r, s) => call<string>('decisionKey', p, r, s),

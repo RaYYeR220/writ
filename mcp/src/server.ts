@@ -28,6 +28,15 @@ A refusal is a successful outcome. writ_execute returns outcome "refused" with r
 (the model answered DENY) or "policy" (it allowed the action above the gate's risk ceiling); no
 funds move and the refusal becomes a permanent public record.
 
+A treasury gate's question carries nine facts, not three: the recipient and amount proposed, the
+gate's nonce, the treasury's balance, the amount as a percentage of that balance, how many
+transfers this gate has approved and refused, and what it has already paid this recipient. All of
+them are the contract's own reading of its state, so none of them can be understated by a caller
+— and all of them are live. A proof is therefore bound to the treasury as it stood when the
+question was built. An unrelated deposit by a stranger between attesting and settling invalidates
+a perfectly good approval; writ_execute detects that and names it, and the remedy is always to
+re-attest rather than to retry. Keep the gap between writ_attest and writ_execute short.
+
 These tools never synthesise a result. If a proof is unavailable, expired, or does not verify,
 the tool returns an error rather than a value. Nothing reports success without a signature that
 recovers to the provider's registered TEE signer.`

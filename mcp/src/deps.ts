@@ -66,12 +66,34 @@ export type SettleArgs = {
  * The slice of a deployed `TreasuryGate` these tools touch, declared structurally so the whole
  * server can be driven without a chain.
  */
+/** What a gate has already paid one recipient. Approvals only — a refusal never lands here. */
+export type RecipientHistory = { payments: bigint; total: bigint }
+
+/**
+ * The treasury state a `TreasuryGate` reports in the question it pins, read from its own
+ * getters rather than from the question text.
+ */
+export type TreasuryState = {
+  balance: bigint
+  nonce: bigint
+  approvedCount: bigint
+  refusedCount: bigint
+  recipient: RecipientHistory
+}
+
 export type GateHandle = {
   address: string
   registryAddress(): Promise<string>
   agent(): Promise<string>
   nonce(): Promise<bigint>
   policy(): Promise<Policy>
+  /**
+   * The live facts the gate would pin, read straight off its state.
+   *
+   * Rejects for a gate that is not a `TreasuryGate`; callers treat that as "not available"
+   * rather than as an error, because the four tools work against any `PolicyGate`.
+   */
+  treasuryState(recipient: string): Promise<TreasuryState>
   /** The exact bytes the contract will pin. Never rebuilt client-side. */
   previewRequestBody(to: string, amountWei: bigint): Promise<Uint8Array>
   decisionKey(provider: string, reqHash: string, respHash: string): Promise<string>

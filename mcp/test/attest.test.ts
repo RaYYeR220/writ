@@ -1,5 +1,6 @@
 import { ethers } from 'ethers'
 import { afterEach, describe, expect, it } from 'vitest'
+import { parseQuestionFacts } from '../src/question.js'
 import { connect, textOf, type Harness } from './helpers/client.js'
 import { GATE, PROVIDER, RECIPIENT, makeWorld, type WorldOptions } from './helpers/world.js'
 
@@ -91,6 +92,33 @@ describe('writ_attest', () => {
     expect(held?.gate).toBe(GATE)
     expect(held?.to).toBe(RECIPIENT)
     expect(held?.amountWei).toBe(ethers.parseEther('0.01'))
+  })
+
+  it('keeps the question it answered, so a later staleness can be explained', async () => {
+    const { world, res } = await attest()
+    const writId = (res.structuredContent as Record<string, unknown>)['writId'] as string
+
+    const held = world.deps.store.get(writId)
+    expect(held?.rawRequest).toBeDefined()
+    expect(parseQuestionFacts(held!.rawRequest)).toMatchObject({
+      recipient: RECIPIENT.toLowerCase(),
+      amount: ethers.parseEther('0.01').toString(),
+      nonce: '0',
+    })
+  })
+
+  it('asks the exact nine-fact question the gate builds, byte for byte', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('10') })
+    harness = await connect(world.deps)
+    const expected = world.buildRequestBody(RECIPIENT, ethers.parseEther('1'))
+
+    const res = await harness.call('writ_attest', { gate: GATE, to: RECIPIENT, amount: '1' })
+    const out = res.structuredContent as Record<string, unknown>
+
+    expect(out['requestHash']).toBe(ethers.sha256(expected))
+    expect(world.archived[0]?.request).toBe(new TextDecoder().decode(expected))
+    expect(world.archived[0]?.request).toContain('treasuryBalance=10000000000000000000')
+    expect(world.archived[0]?.request).toContain('amountPctOfBalance=10')
   })
 })
 

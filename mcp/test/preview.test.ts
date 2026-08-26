@@ -25,7 +25,7 @@ describe('writ_preview_question', () => {
     expect(res.isError).toBeFalsy()
     const out = res.structuredContent as Record<string, unknown>
 
-    const expected = world.buildRequestBody(RECIPIENT, ethers.parseEther('0.01'), 0n)
+    const expected = world.buildRequestBody(RECIPIENT, ethers.parseEther('0.01'))
     expect(out['question']).toBe(new TextDecoder().decode(expected))
     expect(out['questionHex']).toBe(ethers.hexlify(expected))
     expect(out['questionBytes']).toBe(expected.length)
@@ -51,7 +51,7 @@ describe('writ_preview_question', () => {
 
     expect(out['maxRisk']).toBe(25)
     expect(out['allowedProvider']).toBe(PROVIDER)
-    expect(out['allowedModelHash']).toBe(ethers.keccak256(ethers.toUtf8Bytes('gpt-oss-120b')))
+    expect(out['allowedModelHash']).toBe(ethers.keccak256(ethers.toUtf8Bytes('0GM-1.0-35B-A3B')))
   })
 
   it('moves with the nonce, because the question does', async () => {
@@ -69,6 +69,100 @@ describe('writ_preview_question', () => {
     expect(first['nonce']).toBe('0')
     expect(later['nonce']).toBe('7')
     expect(later['requestHash']).not.toBe(first['requestHash'])
+  })
+
+  it('breaks the question out into the nine facts the agent is judged on', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('10') })
+    harness = await connect(world.deps)
+
+    const out = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '1' }))
+      .structuredContent as Record<string, unknown>
+    const facts = out['facts'] as Record<string, unknown>
+
+    expect(facts).toMatchObject({
+      recipient: RECIPIENT,
+      amount: '1000000000000000000',
+      amountOg: '1.0',
+      nonce: '0',
+      treasuryBalance: '10000000000000000000',
+      treasuryBalanceOg: '10.0',
+      amountPctOfBalance: 10,
+      priorApprovals: '0',
+      priorRefusals: '0',
+      recipientPriorPayments: '0',
+      recipientPriorTotal: '0',
+      treasuryCoversAmount: true,
+      recipientIsNew: true,
+    })
+  })
+
+  it('reads the same state back off the gate’s own getters', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('4') })
+    harness = await connect(world.deps)
+
+    const out = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '0.5' }))
+      .structuredContent as Record<string, unknown>
+
+    expect(out['treasury']).toEqual({
+      balance: '4000000000000000000',
+      balanceOg: '4.0',
+      nonce: '0',
+      approvedCount: '0',
+      refusedCount: '0',
+      recipientPayments: '0',
+      recipientTotal: '0',
+      recipientTotalOg: '0.0',
+    })
+  })
+
+  it('warns that the answer is bound to the treasury as it stands now', async () => {
+    harness = await connect(makeWorld().deps)
+
+    const out = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '0.01' }))
+      .structuredContent as Record<string, unknown>
+
+    expect((out['notes'] as string[]).join(' ')).toMatch(/live treasury state/i)
+  })
+
+  it('says an amount the treasury cannot cover is exactly that', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('1') })
+    harness = await connect(world.deps)
+
+    const out = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '3' }))
+      .structuredContent as Record<string, unknown>
+    const facts = out['facts'] as Record<string, unknown>
+
+    expect(facts['amountPctOfBalance']).toBe(300)
+    expect(facts['treasuryCoversAmount']).toBe(false)
+    expect((out['notes'] as string[]).join(' ')).toMatch(/cannot cover this transfer/i)
+  })
+
+  it('does not let a floored percentage read as a free transfer', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('1000') })
+    harness = await connect(world.deps)
+
+    const out = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '0.5' }))
+      .structuredContent as Record<string, unknown>
+
+    expect((out['facts'] as Record<string, unknown>)['amountPctOfBalance']).toBe(0)
+    expect((out['notes'] as string[]).join(' ')).toMatch(/under 1% of the balance, not zero/i)
+  })
+
+  it('moves the facts as the treasury moves', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('10') })
+    harness = await connect(world.deps)
+
+    const before = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '1' }))
+      .structuredContent as Record<string, unknown>
+
+    world.deposit(ethers.parseEther('10'))
+
+    const after = (await harness.call('writ_preview_question', { gate: GATE, to: RECIPIENT, amount: '1' }))
+      .structuredContent as Record<string, unknown>
+
+    expect((before['facts'] as Record<string, unknown>)['amountPctOfBalance']).toBe(10)
+    expect((after['facts'] as Record<string, unknown>)['amountPctOfBalance']).toBe(5)
+    expect(after['requestHash']).not.toBe(before['requestHash'])
   })
 
   it('sends nothing: previewing twice does not touch the chain', async () => {

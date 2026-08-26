@@ -95,8 +95,9 @@ describe('writ_execute refuses to guess', () => {
     const again = await harness!.call('writ_execute', { gate: GATE, writId })
 
     expect(again.isError).toBe(true)
-    // Settling advanced the nonce, so the gate's question has already moved on.
-    expect(textOf(again)).toMatch(/would now ask a different question/i)
+    // Settling advanced the nonce and the counts, so the question has already moved on.
+    expect(textOf(again)).toMatch(/settled another decision in the meantime/i)
+    expect(textOf(again)).toMatch(/writ_attest/)
     expect(world.settled).toHaveLength(1)
   })
 
@@ -129,7 +130,8 @@ describe('writ_execute refuses to guess', () => {
     const res = await harness.call('writ_execute', { gate: GATE, writId })
 
     expect(res.isError).toBe(true)
-    expect(textOf(res)).toMatch(/would now ask a different question/i)
+    expect(textOf(res)).toMatch(/settled another decision in the meantime/i)
+    expect(textOf(res)).toMatch(/nonce 0 -> 9/)
     expect(world.settled).toHaveLength(0)
   })
 
@@ -216,6 +218,99 @@ describe('writ_execute refuses to guess', () => {
 
     expect(res.isError).toBe(true)
     expect(textOf(res)).toMatch(/WRIT_PRIVATE_KEY/)
+  })
+})
+
+describe('writ_execute and a treasury that moved underneath the proof', () => {
+  async function attestThen(change: (w: World) => void) {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('10') })
+    harness = await connect(world.deps)
+
+    const attested = await harness.call('writ_attest', { gate: GATE, to: RECIPIENT, amount: '1' })
+    expect(attested.isError, textOf(attested)).toBeFalsy()
+    const writId = (attested.structuredContent as Record<string, unknown>)['writId'] as string
+
+    change(world)
+
+    return { world, res: await harness.call('writ_execute', { gate: GATE, writId }) }
+  }
+
+  it('names an unrelated deposit as the reason, and says to re-attest rather than retry', async () => {
+    const { world, res } = await attestThen((w) => w.deposit(ethers.parseEther('5')))
+
+    expect(res.isError).toBe(true)
+    expect(res.structuredContent).toBeUndefined()
+
+    const text = textOf(res)
+    expect(text).toMatch(/without this gate settling anything/i)
+    expect(text).toMatch(/deposited into it/i)
+    expect(text).toMatch(/treasuryBalance 10000000000000000000 -> 15000000000000000000/)
+    expect(text).toMatch(/amountPctOfBalance 10 -> 6/)
+    expect(text).toMatch(/Nothing about the transfer changed/i)
+    expect(text).toMatch(/Ask the question again/i)
+    expect(text).toMatch(/Re-submitting this writ cannot work/i)
+
+    expect(world.settled).toHaveLength(0)
+  })
+
+  it('does not blame a stranger when it was this gate that moved', async () => {
+    const { res } = await attestThen((w) => {
+      w.nonce = 3n
+    })
+
+    expect(textOf(res)).toMatch(/settled another decision in the meantime/i)
+    expect(textOf(res)).not.toMatch(/deposited into it/i)
+  })
+
+  it('settles happily when nothing moved in between', async () => {
+    const { world, res } = await attestThen(() => {})
+
+    expect(res.isError, textOf(res)).toBeFalsy()
+    expect((res.structuredContent as Record<string, unknown>)['outcome']).toBe('approved')
+    expect(world.settled).toHaveLength(1)
+  })
+
+  it('explains a revert that a last-second state change caused', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('10') })
+    harness = await connect(world.deps)
+
+    const attested = await harness.call('writ_attest', { gate: GATE, to: RECIPIENT, amount: '1' })
+    const writId = (attested.structuredContent as Record<string, unknown>)['writId'] as string
+
+    // The preflight passes, and the treasury moves as the transaction is being sent.
+    world.options.settleRevert = { name: 'BadSignature', args: ['0xdead', '0xbeef'] }
+    const original = world.deps.gate
+    world.deps.gate = (address) => {
+      const g = original(address)
+      let calls = 0
+      return {
+        ...g,
+        previewRequestBody: async (to, amountWei) => {
+          if (++calls > 1) world.deposit(ethers.parseEther('2'))
+          return g.previewRequestBody(to, amountWei)
+        },
+      }
+    }
+
+    const res = await harness.call('writ_execute', { gate: GATE, writId })
+
+    expect(res.isError).toBe(true)
+    expect(textOf(res)).toMatch(/settlement reverted because/i)
+    expect(textOf(res)).toMatch(/without this gate settling anything/i)
+  })
+
+  it('still reports a plain revert when the question did not move', async () => {
+    const world = makeWorld({ settleRevert: { name: 'BadSignature', args: ['0xdead', '0xbeef'] } })
+    harness = await connect(world.deps)
+
+    const attested = await harness.call('writ_attest', { gate: GATE, to: RECIPIENT, amount: '0.01' })
+    const writId = (attested.structuredContent as Record<string, unknown>)['writId'] as string
+
+    const res = await harness.call('writ_execute', { gate: GATE, writId })
+
+    expect(res.isError).toBe(true)
+    expect(textOf(res)).toMatch(/BadSignature\(0xdead, 0xbeef\)/)
+    expect(textOf(res)).not.toMatch(/reverted because/i)
   })
 })
 

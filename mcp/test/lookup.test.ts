@@ -59,6 +59,33 @@ describe('writ_lookup', () => {
     expect(out['verdict']).toBe('DENY')
   })
 
+  it('reports the nine facts as they stood when the question was asked', async () => {
+    const world = makeWorld({ treasuryBalance: ethers.parseEther('20'), answer: 'ALLOW:7' })
+    harness = await connect(world.deps)
+    const { writId } = await world.seedWrit({ to: RECIPIENT, amountWei: ethers.parseEther('2') })
+
+    // The treasury moves after the question was pinned; the writ still records the old state.
+    world.deposit(ethers.parseEther('80'))
+
+    const out = (await harness.call('writ_lookup', { writId })).structuredContent as Record<string, unknown>
+
+    expect(out['facts']).toMatchObject({
+      recipient: RECIPIENT,
+      amount: '2000000000000000000',
+      amountOg: '2.0',
+      nonce: '0',
+      treasuryBalance: '20000000000000000000',
+      amountPctOfBalance: 10,
+      priorApprovals: '0',
+      priorRefusals: '0',
+      recipientPriorPayments: '0',
+      recipientPriorTotal: '0',
+      treasuryCoversAmount: true,
+      recipientIsNew: true,
+    })
+    expect((out['notes'] as string[]).join(' ')).toMatch(/as it stood when the question was asked/i)
+  })
+
   it('reports a centralized provider’s routing attribution', async () => {
     const routing = {
       providerType: 'centralized',
