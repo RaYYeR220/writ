@@ -93,7 +93,7 @@ describe('attest pipeline', () => {
   it('archives a transcript carrying the exact wire bytes', async () => {
     const opts = baseOpts()
     await attest(opts as never)
-    const [transcript] = opts.archiveTranscript.mock.calls[0] as [Record<string, string>]
+    const [transcript] = opts.archiveTranscript.mock.calls[0] as unknown as [Record<string, string>]
     expect(transcript['request']).toBe(REQUEST)
     expect(transcript['response']).toBe(RESPONSE)
     expect(transcript['reqHash']).toBe(run.reqHash)
