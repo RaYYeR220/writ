@@ -189,7 +189,8 @@ from documentation:
   `FormatRoutingProofText`). This binds strictly more than Format A: it names the upstream that
   actually served the request.
 
-0G's broker produces more families than these two, and Writ implements two. The image format
+0G's broker produces more signed-text families than these two, and Writ implements exactly these
+two. The image format
 (`signImageResponse`) and the scheme-tagged E2EE family (`zg-sig-v1/e2ee-ct`, `…-ct-stream`,
 `…/plain`, assembled in `0g-pc-e2ee/protocol/proof/proof.go`) are **not supported** and are not
 verified. The E2EE family fails closed — three colon-separated fields, which no entry point
@@ -287,7 +288,7 @@ cd ../sdk && pnpm install && pnpm test     # 118
 cd ../mcp && pnpm install && pnpm test     # 145
 cd ../app && pnpm install && pnpm test     # 105
 
-# ── the local world: anvil forks 0G mainnet, the contracts deploy onto it, and 38
+# ── the local world: anvil forks 0G mainnet, the contracts deploy onto it, and 43
 #    pre-registered scenarios run end to end through the real SDK and the real registry.
 cd ../eval && pnpm install && pnpm eval:fork
 ```
@@ -380,7 +381,7 @@ The two pure-verification rows are identical in both modes because they touch no
 widens with the number of state writes inside the bracket.
 
 One full decision on the chat path is `notarize` + `execute` = **489,916 gas**. At the 4.0 gwei
-0G mainnet was charging when this was written, that is **≈ 0.00196 0G**.
+0G mainnet was charging on 2026-08-26, read from `https://evmrpc.0g.ai`, that is **≈ 0.00196 0G**.
 
 **These are lower bounds.** Unless a row says otherwise the `InferenceServing` read goes to
 `contracts/test/mocks/MockInferenceServing.sol`, and 0G's real registry returns a much larger
@@ -446,7 +447,7 @@ window is charged to it. Never quote one without the mode that produced it.
 
 ## Deployed addresses
 
-> ### ⚠ NOTHING IS DEPLOYED YET
+> ### NOTHING IS DEPLOYED YET
 >
 > There is no `WritRegistry` on 0G mainnet, no factory, no gate, and no transaction hash. The
 > deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` holds `0` — checked against
