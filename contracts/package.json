@@ -1,0 +1,12 @@
+{
+  "name": "writ-contracts",
+  "private": true,
+  "type": "module",
+  "description": "Tooling for the Writ contract suite. The contracts themselves build with Foundry.",
+  "scripts": {
+    "fixtures": "node script/gen-fixtures.mjs"
+  },
+  "devDependencies": {
+    "ethers": "^6.13.4"
+  }
+}
