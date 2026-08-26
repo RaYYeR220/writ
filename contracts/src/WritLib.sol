@@ -31,11 +31,7 @@ library WritLib {
 
     /// @notice Recovers the TEE signing address from a proof.
     /// @return The recovered address. Callers must compare it to the provider's registered signer.
-    function recoverSigner(bytes32 reqHash, bytes32 respHash, bytes memory signature)
-        internal
-        pure
-        returns (address)
-    {
+    function recoverSigner(bytes32 reqHash, bytes32 respHash, bytes memory signature) internal pure returns (address) {
         bytes32 digest = MessageHashUtils.toEthSignedMessageHash(signedText(reqHash, respHash));
         return ECDSA.recover(digest, signature);
     }

@@ -31,14 +31,14 @@ library VerdictLib {
         uint256 len = end - start;
         uint256 digitsAt;
         if (
-            len > 6 && body[start] == "A" && body[start + 1] == "L" && body[start + 2] == "L"
-                && body[start + 3] == "O" && body[start + 4] == "W" && body[start + 5] == ":"
+            len > 6 && body[start] == "A" && body[start + 1] == "L" && body[start + 2] == "L" && body[start + 3] == "O"
+                && body[start + 4] == "W" && body[start + 5] == ":"
         ) {
             allowed = true;
             digitsAt = start + 6;
         } else if (
-            len > 5 && body[start] == "D" && body[start + 1] == "E" && body[start + 2] == "N"
-                && body[start + 3] == "Y" && body[start + 4] == ":"
+            len > 5 && body[start] == "D" && body[start + 1] == "E" && body[start + 2] == "N" && body[start + 3] == "Y"
+                && body[start + 4] == ":"
         ) {
             allowed = false;
             digitsAt = start + 5;

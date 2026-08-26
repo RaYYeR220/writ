@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {AgentTreasury} from "../src/examples/AgentTreasury.sol";
+import {TreasuryGate} from "../src/TreasuryGate.sol";
 import {PolicyGate} from "../src/PolicyGate.sol";
 import {WritRegistry} from "../src/WritRegistry.sol";
 import {WritLib} from "../src/WritLib.sol";
@@ -119,7 +120,7 @@ contract AgentTreasuryTest is Test {
         bytes memory resp = _respBody("ALLOW:12");
         bytes memory sig = _sign(req, resp);
         vm.prank(address(0xBAD));
-        vm.expectRevert(abi.encodeWithSelector(AgentTreasury.NotAgent.selector, address(0xBAD)));
+        vm.expectRevert(abi.encodeWithSelector(TreasuryGate.NotAgent.selector, address(0xBAD)));
         treasury.execute(dest, 1 ether, resp, PROVIDER, sig, bytes32(0));
     }
 
