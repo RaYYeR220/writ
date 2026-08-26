@@ -145,7 +145,7 @@ With `providerType = "centralized"` (11) and `providerIdentity = "openrouter"` (
 This binds strictly more than Format A: the TLS certificate fingerprint names the upstream that
 actually served the request. The chat format attests nothing about that.
 
-The fingerprint is normalised by `NormalizeCertFingerprint` (`api/common/tee/tls.go:85-97`):
+The fingerprint is normalised by `NormalizeCertFingerprint` (`api/common/tee/tls.go:83-97`):
 trimmed, lowercased, and required to be exactly `sha256.Size*2 = 64` hex characters. The broker
 **refuses to sign** a routing proof without a well-formed fingerprint (`signing.go:206-217`), so
 this field, like the two hashes, provably cannot contain a `:`.
