@@ -15,21 +15,24 @@ import {IInferenceServing} from "./interfaces/IInferenceServing.sol";
 ///      `notarizeRoutingProof` for a centralized provider's five-field routing proof. Their
 ///      identifiers are domain-separated so the same request/response pair can hold both.
 ///
-///      One thing here is NOT attested and is treated accordingly: the transcript root. The TEE
-///      signs the request and response hashes, never a pointer to an archive, so a root is a
-///      claim by whoever published it. `addTranscript` lets anyone publish another and
-///      `transcriptRoots` returns them all; a reader re-derives `reqHash`/`respHash` from the
-///      bytes a candidate points at rather than trusting the pointer.
+///      One thing here is NOT attested, and it is kept out of the record entirely rather than
+///      stored beside things that are: the transcript root. The TEE signs the request and
+///      response hashes, never a pointer to an archive, so a root is a claim by whoever published
+///      it. `Writ` therefore has no root field and `Notarized` carries none — candidates live in
+///      `transcriptRoots`, anyone may publish one with `addTranscript`, and a reader re-derives
+///      `reqHash`/`respHash` from the bytes a candidate points at rather than trusting any
+///      pointer. Nothing downstream depends on which candidate is right; the proof was verified
+///      by signature recovery, independently of every one of them.
 contract WritRegistry {
+    /// @notice What the TEE signature and 0G's registry between them establish, and nothing else.
+    /// @dev Deliberately carries no archive pointer. A root is not attested by anything, so a
+    ///      field for one sitting beside four verified facts would invite a reader to treat it as
+    ///      a fifth. Candidates live in `transcriptRoots`, where they are labelled as claims.
     struct Writ {
         address provider;
         bytes32 modelHash;
         bytes32 reqHash;
         bytes32 respHash;
-        /// @dev The archive pointer supplied by whoever notarized this writ. It is a HINT, not a
-        ///      fact: the TEE signature does not cover it and this contract cannot check it. See
-        ///      `addTranscript` for how a wrong one is corrected.
-        bytes32 transcriptRoot;
         uint64 notarizedAt;
         address notarizedBy;
     }
@@ -56,16 +59,37 @@ contract WritRegistry {
     /// @dev Generous for `"centralized"` and for any upstream label the broker uses.
     uint256 private constant MAX_ROUTING_FIELD = 32;
 
-    /// @notice How many archive pointers one writ may carry.
-    /// @dev Appending is permissionless, so the list has to be bounded: without a cap anyone
-    ///      could grow it until reading it costs more gas than a block allows. Sixteen is far
-    ///      more than a transcript legitimately needs and small enough that the duplicate scan
-    ///      stays cheap.
-    uint256 public constant MAX_TRANSCRIPT_ROOTS = 16;
+    /// @notice How many archive pointers ONE ADDRESS may publish for one writ.
+    /// @dev The quota is per submitter rather than a cap on the list as a whole, and that choice
+    ///      is the whole defence. A global cap plus permissionless writes cannot both be safe:
+    ///      a griefer spends the entire list on distinct junk roots and the real archivist is
+    ///      locked out forever, which is the front-running this mechanism exists to defeat, only
+    ///      worse. With a per-address quota a griefer can exhaust nothing but their own, and
+    ///      every honest publisher always has room.
+    ///
+    ///      The cost is that the list is unbounded against a sybil: one attacker with N addresses
+    ///      can publish 4N candidates. That is a bounded nuisance rather than a denial — the real
+    ///      root still gets in, and a reader that cannot afford the whole list walks it with
+    ///      `transcriptRootCount` and `transcriptRootAt`. Trading an unbounded read against a
+    ///      permanent lockout is the right way round.
+    ///
+    ///      Four, because a writ has one true transcript and an honest publisher who needs more
+    ///      than a couple of attempts is not publishing, they are guessing.
+    uint256 public constant MAX_ROOTS_PER_SUBMITTER = 4;
 
     mapping(bytes32 => Writ) private _writs;
     mapping(bytes32 => RoutingProof) private _routingProofs;
+
+    /// @dev Candidate archive pointers per writ, in submission order.
     mapping(bytes32 => bytes32[]) private _transcriptRoots;
+
+    /// @dev Who published a given candidate. Non-zero doubles as "already listed", which keeps
+    ///      the duplicate check O(1) — a scan over an unbounded list would itself be griefable.
+    mapping(bytes32 => mapping(bytes32 => address)) private _transcriptSubmitter;
+
+    /// @dev How much of their quota an address has spent on a given writ.
+    mapping(bytes32 => mapping(address => uint256)) private _transcriptQuotaUsed;
+
     uint256 public writCount;
 
     error NotTeeVerifiable(address provider, string verifiability);
@@ -80,8 +104,12 @@ contract WritRegistry {
     error ZeroServing();
     error TranscriptRootEmpty();
     error TranscriptAlreadyListed(bytes32 root);
-    error TooManyTranscriptRoots(uint256 cap);
+    error TranscriptQuotaUsed(address submitter, uint256 quota);
+    error TranscriptIndexOutOfRange(uint256 index, uint256 length);
 
+    /// @dev Carries no transcript root: a root is a claim, and it gets its own event so that a
+    ///      claim is never delivered inside the record of a verified fact. Follow
+    ///      `TranscriptAdded` for pointers, including the one supplied at notarization.
     event Notarized(
         bytes32 indexed id,
         address indexed provider,
@@ -89,7 +117,6 @@ contract WritRegistry {
         string model,
         bytes32 reqHash,
         bytes32 respHash,
-        bytes32 transcriptRoot,
         address notarizedBy
     );
 
@@ -177,21 +204,53 @@ contract WritRegistry {
     ///      against 0G's registered TEE signer, independently of any pointer.
     ///
     ///      Read them in order and stop at the first that re-derives. An unknown writ has none.
+    ///
+    ///      The list has no ceiling — see `MAX_ROOTS_PER_SUBMITTER` for why that is the safer
+    ///      trade — so a caller that cannot bound its own gas should walk it with
+    ///      `transcriptRootCount` and `transcriptRootAt` instead of loading it whole.
     function transcriptRoots(bytes32 id) external view returns (bytes32[] memory) {
         return _transcriptRoots[id];
     }
 
+    /// @notice How many candidate pointers this writ carries.
+    function transcriptRootCount(bytes32 id) external view returns (uint256) {
+        return _transcriptRoots[id].length;
+    }
+
+    /// @notice One candidate and the address that published it, by position.
+    /// @dev The pair a reader actually wants: the pointer to try, and whose claim it is if it
+    ///      turns out to be junk.
+    function transcriptRootAt(bytes32 id, uint256 index) external view returns (bytes32 root, address submitter) {
+        bytes32[] storage roots = _transcriptRoots[id];
+        if (index >= roots.length) revert TranscriptIndexOutOfRange(index, roots.length);
+        root = roots[index];
+        submitter = _transcriptSubmitter[id][root];
+    }
+
+    /// @notice Who published a given candidate for a given writ; zero if it is not listed.
+    /// @dev Attribution, not endorsement. It says who to disbelieve when a root does not
+    ///      re-derive, and nothing about whether it will.
+    function transcriptSubmitter(bytes32 id, bytes32 root) external view returns (address) {
+        return _transcriptSubmitter[id][root];
+    }
+
+    /// @notice How many of `MAX_ROOTS_PER_SUBMITTER` this address has spent on this writ.
+    function transcriptQuotaUsed(bytes32 id, address submitter) external view returns (uint256) {
+        return _transcriptQuotaUsed[id][submitter];
+    }
+
     /// @notice Publish another candidate archive pointer for an existing writ.
     /// @dev Permissionless by design, and it has to be. `notarize` is permissionless and records
-    ///      are immutable, so whoever gets there first fixes `Writ.transcriptRoot` forever — and
-    ///      because the signature endpoint is public, that can be someone who learned the chat id
-    ///      and supplied a junk root. Verification is unaffected either way; only the pointer
-    ///      would be lost. Appending makes a wrong first root noise rather than damage: the real
-    ///      archivist publishes the true root beside it and a consumer re-derives its way to the
-    ///      right one.
+    ///      are immutable, so whoever gets there first would otherwise fix the archive pointer
+    ///      forever — and because the signature endpoint is public, that can be someone who
+    ///      learned the chat id and published a junk root. Verification is unaffected either way;
+    ///      only the pointer would be lost. Appending makes a wrong first root noise rather than
+    ///      damage: the real archivist publishes the true root beside it and a consumer
+    ///      re-derives its way to the right one.
     ///
-    ///      Duplicates are rejected so a griefer cannot pad the list with one value, and the list
-    ///      is capped at `MAX_TRANSCRIPT_ROOTS` so it cannot be grown without bound.
+    ///      Duplicates are rejected so a griefer cannot pad the list with one value, and each
+    ///      address is held to `MAX_ROOTS_PER_SUBMITTER` so no one can spend the room another
+    ///      publisher needs. A rejected call spends no quota.
     /// @param id The writ this pointer claims to archive. It must already be notarized.
     /// @param root A 0G Storage merkle root. Attributed to `msg.sender` in `TranscriptAdded`.
     function addTranscript(bytes32 id, bytes32 root) external {
@@ -200,17 +259,21 @@ contract WritRegistry {
     }
 
     /// @dev The zero root is not a pointer, it is the absence of one, so it is never listed.
+    ///      Every check is O(1): the list this writes to is unbounded, so nothing here may scan
+    ///      it or an attacker could price honest publishers out one append at a time.
     function _addTranscript(bytes32 id, bytes32 root) private {
         if (root == bytes32(0)) revert TranscriptRootEmpty();
+        if (_transcriptSubmitter[id][root] != address(0)) revert TranscriptAlreadyListed(root);
 
-        bytes32[] storage roots = _transcriptRoots[id];
-        uint256 n = roots.length;
-        if (n >= MAX_TRANSCRIPT_ROOTS) revert TooManyTranscriptRoots(MAX_TRANSCRIPT_ROOTS);
-        for (uint256 i = 0; i < n; ++i) {
-            if (roots[i] == root) revert TranscriptAlreadyListed(root);
+        uint256 used = _transcriptQuotaUsed[id][msg.sender];
+        if (used >= MAX_ROOTS_PER_SUBMITTER) revert TranscriptQuotaUsed(msg.sender, MAX_ROOTS_PER_SUBMITTER);
+
+        unchecked {
+            _transcriptQuotaUsed[id][msg.sender] = used + 1;
         }
+        _transcriptSubmitter[id][root] = msg.sender;
+        _transcriptRoots[id].push(root);
 
-        roots.push(root);
         emit TranscriptAdded(id, root, msg.sender);
     }
 
@@ -320,7 +383,6 @@ contract WritRegistry {
             modelHash: modelHash,
             reqHash: reqHash,
             respHash: respHash,
-            transcriptRoot: transcriptRoot,
             notarizedAt: uint64(block.timestamp),
             notarizedBy: msg.sender
         });
@@ -328,9 +390,10 @@ contract WritRegistry {
             ++writCount;
         }
 
-        emit Notarized(id, provider, modelHash, model, reqHash, respHash, transcriptRoot, msg.sender);
+        emit Notarized(id, provider, modelHash, model, reqHash, respHash, msg.sender);
 
-        // The notarizer's root is the first candidate, on the same footing as every later one.
+        // The notarizer's root goes in through the same door as every later one, attributed to
+        // them and against their quota. Being first to record the proof buys no standing here.
         if (transcriptRoot != bytes32(0)) _addTranscript(id, transcriptRoot);
     }
 }

@@ -60,7 +60,6 @@ contract WritRegistryTest is Test {
         assertEq(w.modelHash, keccak256(bytes(MODEL)));
         assertEq(w.reqHash, REQ_H);
         assertEq(w.respHash, RESP_H);
-        assertEq(w.transcriptRoot, ROOT);
         assertEq(w.notarizedBy, address(this));
         assertEq(registry.writCount(), 1);
     }
@@ -108,7 +107,7 @@ contract WritRegistryTest is Test {
         registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
         uint256 used = before - gasleft();
         console.log("notarize gas:", used);
-        assertLt(used, 300_000);
+        assertLt(used, 350_000);
     }
 
     /// The live registry reverts for a provider it has never seen; that must fail closed too.
@@ -130,7 +129,6 @@ contract WritRegistryTest is Test {
         assertEq(w.modelHash, keccak256(bytes(MODEL)));
         assertEq(w.reqHash, REQ_H);
         assertEq(w.respHash, RESP_H);
-        assertEq(w.transcriptRoot, ROOT);
 
         WritRegistry.RoutingProof memory p = registry.getRoutingProof(id);
         assertEq(p.providerType, P_TYPE);
@@ -239,7 +237,7 @@ contract WritRegistryTest is Test {
         registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
         uint256 used = before - gasleft();
         console.log("notarizeRoutingProof gas:", used);
-        assertLt(used, 400_000);
+        assertLt(used, 450_000);
     }
 
     function test_anyoneMayNotarize() public {
@@ -248,27 +246,48 @@ contract WritRegistryTest is Test {
         assertEq(registry.getWrit(id).notarizedBy, address(0x1234));
     }
 
-    /// The root supplied at notarization is the first candidate, not a privileged one.
-    function test_notarizationSeedsTheFirstTranscriptRoot() public {
+    /// The root supplied at notarization is the first candidate, not a privileged one. It is
+    /// attributed to whoever notarized and spends their quota exactly like any later append.
+    function test_notarizationListsTheFirstTranscriptRoot() public {
+        vm.prank(address(0x1234));
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+
         bytes32[] memory roots = registry.transcriptRoots(id);
         assertEq(roots.length, 1);
         assertEq(roots[0], ROOT);
-        assertEq(registry.getWrit(id).transcriptRoot, ROOT);
+        assertEq(registry.transcriptSubmitter(id, ROOT), address(0x1234));
+        assertEq(registry.transcriptQuotaUsed(id, address(0x1234)), 1);
     }
 
     /// A writ notarized without a pointer starts with no candidates at all.
     function test_notarizationWithoutARootListsNothing() public {
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, bytes32(0));
         assertEq(registry.transcriptRoots(id).length, 0);
+        assertEq(registry.transcriptRootCount(id), 0);
+        assertEq(registry.transcriptQuotaUsed(id, address(this)), 0);
     }
 
-    function test_seedsTheFirstTranscriptRootOnTheRoutingPath() public {
+    function test_listsTheFirstTranscriptRootOnTheRoutingPath() public {
         bytes32 id =
             registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
         bytes32[] memory roots = registry.transcriptRoots(id);
         assertEq(roots.length, 1);
         assertEq(roots[0], ROOT);
+    }
+
+    /// The record itself carries no archive pointer. There is no field a reader can mistake for
+    /// an attested fact - the candidates live in one place and are labelled as candidates.
+    function test_theWritRecordCarriesNoArchivePointer() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        WritRegistry.Writ memory w = registry.getWrit(id);
+
+        // Six fields, and none of them is a root: re-encoding round-trips exactly.
+        assertEq(
+            keccak256(abi.encode(w)),
+            keccak256(
+                abi.encode(PROVIDER, keccak256(bytes(MODEL)), REQ_H, RESP_H, uint64(block.timestamp), address(this))
+            )
+        );
     }
 
     function test_anyoneMayAppendATranscriptRoot() public {
@@ -284,11 +303,13 @@ contract WritRegistryTest is Test {
         assertEq(roots.length, 2);
         assertEq(roots[0], ROOT);
         assertEq(roots[1], second);
+        assertEq(registry.transcriptSubmitter(id, second), address(0x1234));
     }
 
     /// Notarizing is permissionless and records are immutable, so a front-runner who learns a
-    /// chat id can fix a junk pointer forever. Appending is the answer: the real root can still
-    /// be published, and a consumer that re-derives the hashes sees which candidate is real.
+    /// chat id can publish a junk pointer first. Appending is the answer: the real root can
+    /// still be published, and a consumer that re-derives the hashes sees which candidate is
+    /// real.
     function test_aFrontRunnersJunkRootDoesNotShutOutTheRealOne() public {
         bytes32 junk = bytes32(uint256(0xDEADBEEF));
         bytes32 real = bytes32(uint256(0xFACADE));
@@ -303,14 +324,75 @@ contract WritRegistryTest is Test {
         assertEq(roots.length, 2);
         assertEq(roots[0], junk);
         assertEq(roots[1], real);
-        // The stale pointer is still the one the record was born with, and always will be.
-        assertEq(registry.getWrit(id).transcriptRoot, junk);
+        assertEq(registry.transcriptSubmitter(id, junk), address(0xF00D));
+        assertEq(registry.transcriptSubmitter(id, real), address(0xA11CE));
     }
 
-    function test_addTranscriptRejectsADuplicateRoot() public {
+    /// THE POINT OF THE QUOTA. A global cap plus permissionless writes lets a griefer spend the
+    /// whole list on distinct junk and lock the real archivist out forever. A per-submitter
+    /// quota means a griefer can only ever exhaust their own.
+    function test_aGrieferCannotDenyTheRealArchivistASlot() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, bytes32(0));
+        uint256 quota = registry.MAX_ROOTS_PER_SUBMITTER();
+
+        vm.startPrank(address(0xBAD));
+        for (uint256 i = 0; i < quota; ++i) {
+            registry.addTranscript(id, bytes32(uint256(0xBAD0000) + i));
+        }
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptQuotaUsed.selector, address(0xBAD), quota));
+        registry.addTranscript(id, bytes32(uint256(0xBAD9999)));
+        vm.stopPrank();
+
+        // The archivist arrives late and is not shut out.
+        bytes32 real = bytes32(uint256(0xFACADE));
+        vm.prank(address(0xA11CE));
+        registry.addTranscript(id, real);
+
+        assertEq(registry.transcriptRootCount(id), quota + 1);
+        assertEq(registry.transcriptSubmitter(id, real), address(0xA11CE));
+        assertEq(registry.transcriptQuotaUsed(id, address(0xBAD)), quota);
+        assertEq(registry.transcriptQuotaUsed(id, address(0xA11CE)), 1);
+    }
+
+    /// The quota is per writ, so exhausting it on one says nothing about the next.
+    function test_theQuotaIsPerWritNotPerAddress() public {
+        bytes32 first = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, bytes32(0));
+        uint256 quota = registry.MAX_ROOTS_PER_SUBMITTER();
+
+        for (uint256 i = 0; i < quota; ++i) {
+            registry.addTranscript(first, bytes32(uint256(0x1000) + i));
+        }
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptQuotaUsed.selector, address(this), quota));
+        registry.addTranscript(first, bytes32(uint256(0x2000)));
+
+        bytes32 second =
+            registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, bytes32(0));
+        registry.addTranscript(second, bytes32(uint256(0x2000)));
+        assertEq(registry.transcriptRootCount(second), 1);
+    }
+
+    /// A root already claimed by anyone is a duplicate, whoever tries it next.
+    function test_addTranscriptRejectsADuplicateFromAnySubmitter() public {
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+
         vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptAlreadyListed.selector, ROOT));
         registry.addTranscript(id, ROOT);
+
+        vm.prank(address(0xB0B));
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptAlreadyListed.selector, ROOT));
+        registry.addTranscript(id, ROOT);
+
+        // A rejected duplicate spends nothing.
+        assertEq(registry.transcriptQuotaUsed(id, address(0xB0B)), 0);
+    }
+
+    /// The same root may legitimately archive two different writs.
+    function test_aRootMayBeListedOnMoreThanOneWrit() public {
+        bytes32 a = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        bytes32 b =
+            registry.notarizeRoutingProof(PROVIDER, REQ_H, RESP_H, P_TYPE, P_IDENTITY, TLS_FP, ROUTING_SIG, ROOT);
+        assertEq(registry.transcriptRoots(a)[0], ROOT);
+        assertEq(registry.transcriptRoots(b)[0], ROOT);
     }
 
     function test_addTranscriptRejectsTheZeroRoot() public {
@@ -326,23 +408,34 @@ contract WritRegistryTest is Test {
     }
 
     function test_transcriptRootsOfAnUnknownWritAreEmpty() public view {
-        assertEq(registry.transcriptRoots(keccak256("nope")).length, 0);
+        bytes32 ghost = keccak256("nope");
+        assertEq(registry.transcriptRoots(ghost).length, 0);
+        assertEq(registry.transcriptRootCount(ghost), 0);
+        assertEq(registry.transcriptSubmitter(ghost, ROOT), address(0));
     }
 
-    /// Appending is free to anyone, so it must be bounded or the list could be griefed into
-    /// gas nobody can afford to read.
-    function test_transcriptRootsAreCapped() public {
+    /// The list is unbounded by design - a global cap is what the quota replaces - so a reader
+    /// that cannot afford to load it all walks it by index instead.
+    function test_transcriptRootsCanBeWalkedByIndex() public {
         bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
-        uint256 cap = registry.MAX_TRANSCRIPT_ROOTS();
+        vm.prank(address(0xB0B));
+        registry.addTranscript(id, bytes32(uint256(0xB0B)));
 
-        for (uint256 i = 1; i < cap; ++i) {
-            registry.addTranscript(id, bytes32(i + 1));
-        }
-        assertEq(registry.transcriptRoots(id).length, cap);
+        assertEq(registry.transcriptRootCount(id), 2);
 
-        bytes32 overflowing = bytes32(cap + 99);
-        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TooManyTranscriptRoots.selector, cap));
-        registry.addTranscript(id, overflowing);
+        (bytes32 root0, address who0) = registry.transcriptRootAt(id, 0);
+        assertEq(root0, ROOT);
+        assertEq(who0, address(this));
+
+        (bytes32 root1, address who1) = registry.transcriptRootAt(id, 1);
+        assertEq(root1, bytes32(uint256(0xB0B)));
+        assertEq(who1, address(0xB0B));
+    }
+
+    function test_transcriptRootAtRevertsPastTheEnd() public {
+        bytes32 id = registry.notarize(PROVIDER, REQ_H, RESP_H, SIG, ROOT);
+        vm.expectRevert(abi.encodeWithSelector(WritRegistry.TranscriptIndexOutOfRange.selector, uint256(1), uint256(1)));
+        registry.transcriptRootAt(id, 1);
     }
 
     function test_measuresAddTranscriptGas() public {
@@ -351,6 +444,6 @@ contract WritRegistryTest is Test {
         registry.addTranscript(id, bytes32(uint256(0xB0B)));
         uint256 used = before - gasleft();
         console.log("addTranscript gas:", used);
-        assertLt(used, 100_000);
+        assertLt(used, 150_000);
     }
 }

@@ -142,7 +142,7 @@ contract AgentTreasuryTest is Test {
         assertEq(address(treasury).balance, 10 ether);
         assertTrue(registry.isNotarized(id));
         assertTrue(treasury.consumed(id));
-        assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xC0FFEE)));
+        assertEq(registry.transcriptRoots(id)[0], bytes32(uint256(0xC0FFEE)));
         assertEq(treasury.nonce(), 1);
     }
 
@@ -493,7 +493,7 @@ contract AgentTreasuryTest is Test {
 
         assertTrue(registry.isNotarized(id));
         assertTrue(treasury.consumed(id));
-        assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xBEEF)));
+        assertEq(registry.transcriptRoots(id)[0], bytes32(uint256(0xBEEF)));
         // Whoever paid for the notarization is on the record, and it need not be the gate.
         assertEq(registry.getWrit(id).notarizedBy, address(this));
     }
@@ -646,7 +646,7 @@ contract AgentTreasuryTest is Test {
 
         // The settlement rolled back; the record did not.
         assertTrue(registry.isNotarized(id));
-        assertEq(registry.getWrit(id).transcriptRoot, bytes32(uint256(0xBEEF)));
+        assertEq(registry.transcriptRoots(id)[0], bytes32(uint256(0xBEEF)));
         assertEq(registry.getWrit(id).notarizedBy, address(this));
         assertFalse(treasury.consumed(id));
         assertEq(treasury.nonce(), 0);
