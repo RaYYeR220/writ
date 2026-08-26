@@ -579,6 +579,11 @@ contract AgentTreasuryTest is Test {
         assertEq(registry.getWrit(id).notarizedBy, address(this));
     }
 
+    /// The ceilings below are regression guards, not pins. `gasleft()` deltas read higher under
+    /// `forge test --gas-report`, whose instrumentation is charged inside the measured window, so
+    /// each ceiling clears the larger of the two readings. Plain `forge test` reports the number a
+    /// caller actually pays; the gas report reports it plus the harness.
+    ///
     /// Records the cost of settling: pin the question, read the record back, pay out. The
     /// notarization is a separate transaction and is measured in `WritRegistry.t.sol`.
     function test_measuresExecuteGas() public {
@@ -590,7 +595,7 @@ contract AgentTreasuryTest is Test {
         treasury.execute(dest, 1 ether, resp, PROVIDER);
         uint256 used = before - gasleft();
         console.log("execute gas (approved):", used);
-        assertLt(used, 200_000);
+        assertLt(used, 300_000);
     }
 
     function test_measuresRefusalGas() public {
@@ -602,7 +607,7 @@ contract AgentTreasuryTest is Test {
         treasury.execute(dest, 9 ether, resp, PROVIDER);
         uint256 used = before - gasleft();
         console.log("execute gas (refused):", used);
-        assertLt(used, 200_000);
+        assertLt(used, 250_000);
     }
 
     /// An attested ALLOW to the zero address would burn the treasury as surely as a bad recover.
@@ -703,7 +708,7 @@ contract AgentTreasuryTest is Test {
         treasury.executeRoutingProof(dest, 1 ether, resp, PROVIDER, _routing());
         uint256 used = before - gasleft();
         console.log("executeRoutingProof gas (approved):", used);
-        assertLt(used, 200_000);
+        assertLt(used, 320_000);
     }
 
     function test_acceptsFunds() public {
