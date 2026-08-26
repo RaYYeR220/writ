@@ -3,11 +3,30 @@ node_modules/
 .env.*
 !.env.example
 
+# Build output. `app/` and `mcp/` also carry their own .gitignore; these are the same
+# rules restated at the root so deleting one of those files cannot expose build output.
+# `explorer/.next/` used to live here, from when the app was called explorer — it matched
+# nothing after the rename.
+app/.next/
+app/out/
+mcp/build/
+sdk/dist/
 contracts/out/
 contracts/cache/
 contracts/broadcast/
-explorer/.next/
-sdk/dist/
+*.tsbuildinfo
+
+# Not contracts/lib/ — those are the forge-std and openzeppelin submodules and they are tracked.
+
+# Test output
+coverage/
+lcov.info
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
 
 BRIEF.md
 SPIKE.md
