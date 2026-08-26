@@ -57,9 +57,20 @@ export type Probe =
   | 'crafted-response'
   /** A genuine proof of a question the agent wrote rather than the one the gate asked. */
   | 'unrelated-question'
-  /** A genuine signature, over response bytes that were edited after it was produced. */
+  /**
+   * A genuine signature, over response bytes that were edited after it was produced.
+   *
+   * Settlement does not notarize, so the altered bytes have to be taken to `WritRegistry` first
+   * and that is where recovery fails. The honest proof is deliberately left off the record so
+   * `writCount` measures only the forgery.
+   */
   | 'altered-response'
-  /** The right text, signed by a key that is not the provider's registered TEE. */
+  /**
+   * The right text, signed by a key that is not the provider's registered TEE.
+   *
+   * Also rejected at the registry now. Nothing is notarized anywhere in this probe, so a run of
+   * it leaves `writCount` exactly where it found it.
+   */
   | 'forged-signature'
   /** A whole provider endpoint signing with the wrong key, so the SDK meets it as a client would. */
   | 'forged-provider'
@@ -177,7 +188,14 @@ export type Outcome =
   | 'refused-model'
   /** `TransferRefused` with `refusedBy == Policy`. Also a successful transaction. */
   | 'refused-policy'
-  /** The settlement reverted. No decision was recorded and nothing moved. */
+  /**
+   * A transaction reverted and nothing moved.
+   *
+   * Since notarization was split out of settlement there are two places this can happen, and the
+   * `mechanism` string names which: `WritRegistry.notarize` refusing to record a proof at all, or
+   * `TreasuryGate.execute` refusing to act on the record it can see. The first is the stronger
+   * refusal — a proof the registry rejects never enters the permanent record.
+   */
   | 'blocked'
   /** The SDK refused before any transaction was sent. */
   | 'attest-failed'
@@ -192,7 +210,12 @@ export type Result = {
   expected: Expected
   outcome: Outcome
   pass: boolean
-  /** What stopped it, as observed: a custom error name, an event, or an SDK message. */
+  /**
+   * What stopped it, as observed: a custom error name, an event, or an SDK message.
+   *
+   * A revert also says where it happened — `... at WritRegistry.notarize` or
+   * `... at TreasuryGate.execute` — because since the split those are two different claims.
+   */
   mechanism: string
   /** True when the mechanism was not one the answer key predicted. Reported, not graded. */
   mechanismMismatch: boolean

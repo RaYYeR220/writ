@@ -235,6 +235,11 @@ type Settlement = {
  *
  * The call is simulated first so a revert can be named precisely, then sent anyway so the refusal
  * is a real transaction on a real chain rather than something we only predicted.
+ *
+ * `execute` takes no signature and no transcript root: it does not notarize. The writ has to be
+ * on the registry's record already, which is what `attestWith` does on the honest paths and what
+ * `notarizeAt` does on the paths that deliberately present something the registry should refuse.
+ * A gate asked to spend a decision that was never recorded reverts `WritNotNotarized`.
  */
 async function settle(
   env: EvalEnv,
@@ -242,11 +247,9 @@ async function settle(
   amount: bigint,
   rawResponse: Uint8Array,
   provider: string,
-  signature: string,
-  transcriptRoot: string,
 ): Promise<Settlement> {
   const t = env.treasury
-  const args = [to, amount, rawResponse, provider, signature, transcriptRoot] as const
+  const args = [to, amount, rawResponse, provider] as const
 
   try {
     await t['execute']!.staticCall(...args)
@@ -260,7 +263,12 @@ async function settle(
     } catch (sendErr) {
       settleTx = (sendErr as { receipt?: { hash?: string } }).receipt?.hash
     }
-    return { outcome: 'blocked', mechanism: named, fundsMoved: false, ...(settleTx ? { settleTx } : {}) }
+    return {
+      outcome: 'blocked',
+      mechanism: `${named} at TreasuryGate.execute`,
+      fundsMoved: false,
+      ...(settleTx ? { settleTx } : {}),
+    }
   }
 
   const before = await env.wallet.provider!.getBalance(to)
@@ -307,6 +315,85 @@ async function settle(
   }
 }
 
+// ---------------------------------------------------------------- the registry
+
+/** What `WritRegistry.notarize` did with a proof, and what it cost the permanent record. */
+type Notarization = {
+  /** True only if the registry actually wrote the writ. */
+  recorded: boolean
+  /** The registry's own words: `Notarized`, or the custom error it refused with. */
+  mechanism: string
+  writId: string
+  txHash?: string
+  writCountBefore: bigint
+  writCountAfter: bigint
+}
+
+/**
+ * Offers a proof to `WritRegistry` directly, the way a client now has to before any gate will
+ * look at it, and reports what the registry did.
+ *
+ * `writCount` is read either side of the attempt because that number is the claim. A proof the
+ * registry refuses does not reach the permanent record at all — it is not recorded and then
+ * un-recorded, it never lands — and the only honest way to say so is to measure it.
+ *
+ * Simulated first so the revert can be named, then sent anyway, exactly as `settle` does: a
+ * refusal we only predicted is not a refusal that happened.
+ */
+async function notarizeAt(
+  env: EvalEnv,
+  reqHash: string,
+  respHash: string,
+  signature: string,
+  transcriptRoot: string,
+): Promise<Notarization> {
+  const r = env.registry
+  const writId = String(await r['writId']!(env.provider, reqHash, respHash))
+  const writCountBefore = (await r['writCount']!()) as bigint
+  const args = [env.provider, reqHash, respHash, signature, transcriptRoot] as const
+  const after = async (): Promise<bigint> => (await r['writCount']!()) as bigint
+
+  try {
+    await r['notarize']!.staticCall(...args)
+  } catch (e) {
+    const named = revertName(e)
+    if (named === null) throw e // a network failure, not a refusal
+    let txHash: string | undefined
+    try {
+      const receipt = await (await r['notarize']!(...args, GAS)).wait()
+      txHash = receipt?.hash
+    } catch (sendErr) {
+      txHash = (sendErr as { receipt?: { hash?: string } }).receipt?.hash
+    }
+    return {
+      recorded: false,
+      mechanism: `${named} at WritRegistry.notarize`,
+      writId,
+      ...(txHash ? { txHash } : {}),
+      writCountBefore,
+      writCountAfter: await after(),
+    }
+  }
+
+  const receipt = await (await r['notarize']!(...args, GAS)).wait()
+  if (!receipt) throw new Error('notarization produced no receipt')
+  return {
+    recorded: true,
+    mechanism: 'Notarized',
+    writId,
+    txHash: receipt.hash,
+    writCountBefore,
+    writCountAfter: await after(),
+  }
+}
+
+/** What the attempt did to the permanent record, in the report's own words. */
+function traceOf(n: Notarization): string {
+  return n.writCountAfter === n.writCountBefore
+    ? `writCount did not move (${n.writCountBefore} before and after), so the attempt left no trace on the permanent record`
+    : `writCount moved ${n.writCountBefore} -> ${n.writCountAfter}`
+}
+
 // ---------------------------------------------------------------- the SDK paths
 
 function attestWith(env: EvalEnv, session: Session, bodyBytes: Uint8Array): Promise<AttestResult> {
@@ -328,9 +415,11 @@ function attestWith(env: EvalEnv, session: Session, bodyBytes: Uint8Array): Prom
 /**
  * Inference and proof, stopping before notarization.
  *
- * Needed by the forged-signature control: once a writ is on the record `PolicyGate` trusts the
- * record rather than re-checking the signature it was handed, so a forgery has to be presented to
- * a registry that has not already seen the honest proof.
+ * Needed by both forgery controls. Once a writ is on the record `PolicyGate` trusts the record
+ * rather than re-checking the signature it was handed, so a forgery has to be presented to a
+ * registry that has not already seen the honest proof. Stopping here also leaves `writCount`
+ * untouched, which is what lets those controls say the forgery left no trace on the permanent
+ * record rather than merely that it was refused.
  */
 async function proveOnly(env: EvalEnv, session: Session, bodyBytes: Uint8Array) {
   const run = await runAttested({ broker: env.broker, provider: env.provider, endpoint: session.endpoint, bodyBytes })
@@ -352,12 +441,62 @@ type Ran = Omit<Settlement, 'outcome'> & {
   detail?: string
 }
 
+/**
+ * Presents a response/signature pair no honest run produced, first to the registry and then to
+ * the gate regardless of what the registry said.
+ *
+ * This is what the notarize/settle split changed about the forgery controls, and it changed them
+ * for the better. The old single-transaction `execute` notarized on the way past, so a forgery
+ * was refused *inside the settlement* — the strongest thing that could be said was that no funds
+ * moved. Now the forgery has to be taken to `WritRegistry` on its own, and the registry is where
+ * the TEE signature is checked, so the claim becomes: it never enters the permanent record.
+ * `writCount` is measured across the attempt to say that rather than assert it.
+ *
+ * The gate is then asked anyway. With nothing on the record behind it there is nothing for the
+ * gate to spend, and observing that second refusal costs one call and assumes nothing.
+ *
+ * If the registry ACCEPTS the pair, the control has failed. Nothing is short-circuited in that
+ * case: the settlement goes ahead so the harness reports what actually happened — up to and
+ * including a false approval, which is the loudest signal this scorecard has.
+ */
+async function offerForgery(
+  env: EvalEnv,
+  to: string,
+  amount: bigint,
+  reqHash: string,
+  rawResponse: Uint8Array,
+  signature: string,
+  what: string,
+): Promise<Ran> {
+  const n = await notarizeAt(env, reqHash, rootFor(rawResponse), signature, rootFor(rawResponse))
+
+  if (n.recorded) {
+    return {
+      ...(await settle(env, to, amount, rawResponse, env.provider)),
+      verdict: verdictOf(rawResponse),
+      notarizeTx: n.txHash,
+      writId: n.writId,
+      detail: `THE REGISTRY ACCEPTED IT — ${what}; recorded as writ ${n.writId} and ${traceOf(n)}`,
+    }
+  }
+
+  const atGate = await settle(env, to, amount, rawResponse, env.provider)
+  return {
+    outcome: atGate.outcome,
+    mechanism: atGate.outcome === 'blocked' ? n.mechanism : `${n.mechanism}, then ${atGate.mechanism}`,
+    fundsMoved: atGate.fundsMoved,
+    ...(atGate.settleTx ? { settleTx: atGate.settleTx } : {}),
+    verdict: verdictOf(rawResponse),
+    detail: `${what}. Rejected by ${n.mechanism}, and ${traceOf(n)}. Offered to the gate anyway with nothing on the record behind it: ${atGate.mechanism}`,
+  }
+}
+
 async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string, amount: bigint): Promise<Ran> {
   switch (s.probe) {
     case 'normal': {
       const r = await attestWith(env, session, await gateBody(env, to, amount))
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
       }
@@ -370,7 +509,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       if (BigInt(honest.nonce) + offset < 0n) {
         // A negative offset needs somewhere to go. Spend one decision so the gate has a past.
         const w = await attestWith(env, session, await gateBody(env, to, 1n))
-        await settle(env, to, 1n, w.run.rawResponse, env.provider, w.signature, w.transcriptRoot)
+        await settle(env, to, 1n, w.run.rawResponse, env.provider)
         // Re-read: that settlement moved the nonce, the balance and this recipient's history,
         // so every other fact in the question has to be the one the gate would report now.
         honest = await factsFor(env, to, amount)
@@ -379,7 +518,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const body = await bodyForFacts(env, honest, { ...honest, nonce: (BigInt(honest.nonce) + offset).toString() })
       const r = await attestWith(env, session, body)
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         ...(detail ? { detail } : {}),
@@ -391,7 +530,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const { facts, lies } = doctorFacts(honest, s.factOverrides ?? {})
       const r = await attestWith(env, session, await bodyForFacts(env, honest, facts))
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `the provider was asked about, and signed, ${lies.join('; ')}`,
@@ -412,7 +551,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
         }
       }
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `the proof answers a treasury of ${ethers.formatEther(before)} 0G; ${ethers.formatEther(delta)} 0G was paid in before settling, leaving ${ethers.formatEther(after)} 0G`,
@@ -423,7 +562,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const settleAmount = resolveAmount(s.executeAmount!, await env.wallet.provider!.getBalance(env.treasuryAddress))
       const r = await attestWith(env, session, await gateBody(env, to, amount))
       return {
-        ...(await settle(env, to, settleAmount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, settleAmount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `proof answers ${ethers.formatEther(amount)} 0G, settled ${ethers.formatEther(settleAmount)} 0G`,
@@ -434,7 +573,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const other = resolveRecipient(s.executeRecipient ?? { kind: 'random' }, env)
       const r = await attestWith(env, session, await gateBody(env, to, amount))
       return {
-        ...(await settle(env, other, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, other, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `proof answers ${to}, settled to ${other}`,
@@ -453,7 +592,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
 
       const r = await attestWith(env, session, doctored)
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `provider saw and signed the injected body (${doctored.length} bytes); the gate's own question contains the injection: ${reachable}`,
@@ -466,7 +605,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const r = await attestWith(env, session, doctored)
       // Reaching here means the SDK ran a streaming request, which it must not.
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         detail: 'the SDK did NOT refuse the streaming request',
       }
@@ -474,11 +613,11 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
 
     case 'replay': {
       const r = await attestWith(env, session, await gateBody(env, to, amount))
-      const first = await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)
+      const first = await settle(env, to, amount, r.run.rawResponse, env.provider)
       if (first.outcome !== 'approved') {
         return { ...first, outcome: 'errored', detail: `the decision to be replayed did not settle: ${first.mechanism}` }
       }
-      const second = await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)
+      const second = await settle(env, to, amount, r.run.rawResponse, env.provider)
       return {
         ...second,
         verdict: verdictOf(r.run.rawResponse),
@@ -491,7 +630,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const r = await attestWith(env, session, await gateBody(env, to, amount))
       const impostor = ethers.getAddress(s.executeProvider!)
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, impostor, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, impostor)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         detail: `proof is from ${env.provider}, settled naming ${impostor}`,
@@ -502,17 +641,36 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       const body = await gateBody(env, to, amount)
       const response = enc.encode(s.craftedResponse!)
       const signature = await session.signPair!(body, response)
+
+      // The odd one out among the three probes that had to change for the split, and the reason
+      // this harness cannot claim one tidy sentence for all of them. The stand-in TEE really did
+      // sign this exact pair, so the registry SHOULD take it: what is wrong with this answer is
+      // its shape, not its provenance, and shape is the gate's business rather than the
+      // registry's. The rejection therefore stays where it always was, at `VerdictLib` — but the
+      // writ is now permanently recorded first, where the old inline path would have rolled it
+      // back along with the settlement.
+      const n = await notarizeAt(env, rootFor(body), rootFor(response), signature, rootFor(response))
+      if (!n.recorded) {
+        return {
+          outcome: 'errored',
+          mechanism: n.mechanism,
+          fundsMoved: false,
+          detail: `WritRegistry refused a request/response pair the stand-in TEE genuinely signed, so this probe never reached the verdict parser it exists to test; ${traceOf(n)}`,
+        }
+      }
       return {
-        ...(await settle(env, to, amount, response, env.provider, signature, rootFor(response))),
+        ...(await settle(env, to, amount, response, env.provider)),
         verdict: verdictOf(response),
-        detail: 'the stand-in TEE signed a response body we composed, to probe the verdict parser',
+        notarizeTx: n.txHash,
+        writId: n.writId,
+        detail: `the stand-in TEE signed a response body we composed; the registry accepted that signature and recorded writ ${n.writId} (${traceOf(n)}), and the gate then refused to read a verdict out of the body`,
       }
     }
 
     case 'unrelated-question': {
       const r = await attestWith(env, session, enc.encode(s.unrelatedQuestion!))
       return {
-        ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+        ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
         verdict: verdictOf(r.run.rawResponse),
         notarizeTx: r.txHash,
         writId: r.writId,
@@ -521,8 +679,12 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
     }
 
     case 'altered-response': {
-      const r = await attestWith(env, session, await gateBody(env, to, amount))
-      const original = dec.decode(r.run.rawResponse)
+      // `proveOnly`, not `attestWith`: the honest writ is deliberately left off the record so
+      // that `writCount` across this probe measures exactly one thing — whether the altered
+      // bytes got onto it. Notarizing the honest proof first would move the number for an
+      // honest reason and blunt the claim.
+      const { run, proof } = await proveOnly(env, session, await gateBody(env, to, amount))
+      const original = dec.decode(run.rawResponse)
       const edit = s.responseEdit!
       if (!original.includes(edit.from)) {
         return {
@@ -533,23 +695,30 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
         }
       }
       const altered = enc.encode(original.replace(edit.from, edit.to))
-      return {
-        ...(await settle(env, to, amount, altered, env.provider, r.signature, r.transcriptRoot)),
-        verdict: verdictOf(altered),
-        notarizeTx: r.txHash,
-        detail: `signed ${JSON.stringify(edit.from)}, settled ${JSON.stringify(edit.to)} with the genuine signature`,
-      }
+      return offerForgery(
+        env,
+        to,
+        amount,
+        run.reqHash,
+        altered,
+        proof.signature,
+        `the provider signed ${JSON.stringify(edit.from)} and the genuine signature was kept, but ${JSON.stringify(edit.to)} was the body presented`,
+      )
     }
 
     case 'forged-signature': {
       const { run, proof } = await proveOnly(env, session, await gateBody(env, to, amount))
       const forger = ethers.Wallet.createRandom()
       const forged = await forger.signMessage(proof.text)
-      return {
-        ...(await settle(env, to, amount, run.rawResponse, env.provider, forged, rootFor(run.rawResponse))),
-        verdict: verdictOf(run.rawResponse),
-        detail: `exactly the right signed text, signed by ${forger.address} instead of the registered TEE signer ${session.teeSigner}`,
-      }
+      return offerForgery(
+        env,
+        to,
+        amount,
+        run.reqHash,
+        run.rawResponse,
+        forged,
+        `exactly the right signed text, signed by ${forger.address} instead of the registered TEE signer ${session.teeSigner}`,
+      )
     }
 
     case 'forged-provider': {
@@ -557,7 +726,7 @@ async function runProbe(env: EvalEnv, s: Scenario, session: Session, to: string,
       try {
         const r = await attestWith(env, { ...forged, teeSigner: session.teeSigner }, await gateBody(env, to, amount))
         return {
-          ...(await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)),
+          ...(await settle(env, to, amount, r.run.rawResponse, env.provider)),
           verdict: verdictOf(r.run.rawResponse),
           detail: 'the SDK did NOT refuse a provider signing with the wrong key',
         }
@@ -586,7 +755,7 @@ async function buildHistory(env: EvalEnv, s: Scenario, to: string): Promise<stri
     try {
       const amount = resolveAmount(spec, await env.wallet.provider!.getBalance(env.treasuryAddress))
       const r = await attestWith(env, session, await gateBody(env, to, amount))
-      const settled = await settle(env, to, amount, r.run.rawResponse, env.provider, r.signature, r.transcriptRoot)
+      const settled = await settle(env, to, amount, r.run.rawResponse, env.provider)
       if (settled.outcome !== 'approved') {
         throw new Error(
           `history: a prior payment of ${ethers.formatEther(amount)} 0G to ${to} did not settle (${settled.mechanism}), so this scenario has no payment history to be judged against`,
