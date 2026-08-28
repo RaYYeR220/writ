@@ -78,14 +78,27 @@ const service = {
   teeSignerAcknowledged: Boolean(svc.teeSignerAcknowledged),
 }
 
-const broker = await createZGComputeNetworkBroker(wallet)
+// Everything up to here was read-only. From here on the account has to be real, so a failure is
+// reported as a failure to measure rather than allowed to look like a verdict about the provider.
+const broker = await createZGComputeNetworkBroker(wallet).catch((e: Error) => {
+  console.error(`could not open a 0G compute broker for ${wallet.address}: ${e.message}`)
+  console.error('the account needs a funded ledger — see broker.ledger.addLedger()')
+  process.exit(2)
+})
 
 // A gas-only transaction, once per provider per account. Nothing is spent from the compute
 // ledger by it, and it is what lets the broker mint the billing header below.
 if (service.verifiability === 'TeeML' && service.teeSignerAcknowledged) {
-  await broker.inference.acknowledgeProviderSigner(provider).catch((e: Error) => {
-    if (!/already acknowledged/i.test(e.message)) throw e
-  })
+  try {
+    await broker.inference.acknowledgeProviderSigner(provider)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (!/already acknowledged/i.test(msg)) {
+      console.error(`could not acknowledge ${provider}'s TEE signer: ${msg}`)
+      console.error('that is a gas-only transaction from your own account, and nothing was measured')
+      process.exit(2)
+    }
+  }
 }
 
 const report = await checkProviderPassthrough({
