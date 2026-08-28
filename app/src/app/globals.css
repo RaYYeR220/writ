@@ -1618,6 +1618,126 @@ pre.code {
   overflow-wrap: anywhere;
 }
 
+/* ============================================================================
+   REQUEST BINDING — the third state
+   ----------------------------------------------------------------------------
+   Neither a verdict nor a proof, so it borrows neither language.
+
+   Verdict state is colour on the seam. Proof state is achromatic geometry and
+   is the only thing in the app allowed to read as broken. This is a third
+   thing: a property of the provider, known before anything is asked, and
+   nothing about it is a failure — a broker that rewrites a request is doing
+   what 0G documents.
+
+   So it is typographic, not geometric: a hairline, a small-caps mark, and a
+   three-step tonal ladder in ink. No verdict colour, no reserved accent, no
+   hatch, no node, no strike-through.
+   ========================================================================= */
+.stamp {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1px 10px;
+  align-items: baseline;
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px solid var(--rule-hair);
+}
+
+.stamp .mark {
+  font-family: var(--font-cond), 'Saira Condensed', Impact, sans-serif;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+/* The ladder: both halves bound reads strongest, one half reads level with the
+   surrounding prose, and never-checked recedes. Tone only. */
+.stamp[data-state='response-only'] .mark,
+.stamp[data-state='unusable'] .mark {
+  color: var(--ink-2);
+}
+
+.stamp[data-state='unmeasured'] {
+  border-top-style: dotted;
+}
+
+.stamp[data-state='unmeasured'] .mark {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.stamp .when {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.stamp .why {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin-top: 3px;
+}
+
+/* The panel that explains why the page will not spend your balance for you. */
+.measured {
+  margin-top: 16px;
+  border-top: 1px solid var(--rule-hair);
+  padding-top: 10px;
+}
+
+.disclose {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--rule);
+  padding: 2px 0;
+}
+
+.disclose:hover {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.measured .body {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+.measured .body p {
+  margin: 0 0 10px;
+}
+
+.measured .body b {
+  color: var(--ink);
+}
+
+.measured textarea {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 8px 9px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.measured textarea:focus {
+  border-color: var(--ink);
+  outline: none;
+}
+
 /* The live digest sits ON the seam and stays there while the form scrolls past
    it, because the point is watching it turn over as you type. */
 .digest-pin {

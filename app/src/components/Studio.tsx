@@ -9,6 +9,15 @@ import { connectWallet, explain, factoryContract } from '@/lib/chain'
 import { addressUrl, config, missingFactoryReason } from '@/lib/config'
 import { loadServices, type ServiceOption } from '@/lib/services'
 import {
+  compatibilityOf,
+  loadImported,
+  measuredOn,
+  measurementSummary,
+  parseMeasurement,
+  saveImported,
+  type PassthroughRecord,
+} from '@/lib/passthrough'
+import {
   DEFAULT_HEAD,
   DEFAULT_TAIL,
   buildParams,
@@ -92,6 +101,19 @@ export function Studio() {
   const [digest, setDigest] = useState<string | null>(null)
   const [wallet, setWallet] = useState<{ address: string } | null>(null)
   const [deploy, setDeploy] = useState<Deploy>({ kind: 'idle' })
+  // Measurements pasted into this browser. Read once, on the client, because localStorage does
+  // not exist while this renders on the server.
+  const [imported, setImported] = useState<PassthroughRecord[]>([])
+
+  useEffect(() => setImported(loadImported()), [])
+
+  function record(entry: PassthroughRecord) {
+    setImported((prev) => {
+      const next = [...prev.filter((r) => r.provider.toLowerCase() !== entry.provider.toLowerCase()), entry]
+      saveImported(next)
+      return next
+    })
+  }
 
   useEffect(() => {
     let live = true
@@ -235,6 +257,8 @@ export function Studio() {
               services={services}
               error={servicesError}
               selected={draft.provider}
+              imported={imported}
+              onRecord={record}
               onSelect={(s) => setDraft({ ...draft, provider: s.provider, model: s.model })}
             />
 
@@ -443,11 +467,15 @@ function ProviderPicker({
   services,
   error,
   selected,
+  imported,
+  onRecord,
   onSelect,
 }: {
   services: ServiceOption[] | null
   error: string | null
   selected: string
+  imported: PassthroughRecord[]
+  onRecord: (r: PassthroughRecord) => void
   onSelect: (s: ServiceOption) => void
 }) {
   if (error) {
@@ -506,9 +534,12 @@ function ProviderPicker({
               verifiability <b>TeeML</b>, signer acknowledged — a contract can check its signature against a key 0G
               publishes.
             </div>
+            <Compat record={compatibilityOf(s.provider, imported)} />
           </button>
         ))}
       </div>
+
+      <MeasurePanel selected={selected} onRecord={onRecord} />
 
       {blocked.length > 0 ? (
         <>
@@ -529,6 +560,127 @@ function ProviderPicker({
             ))}
           </div>
         </>
+      ) : null}
+    </div>
+  )
+}
+
+/* ──────────────────────────────────────────── request-binding state ────── */
+
+/**
+ * The third thing a provider has to be, and the quietest.
+ *
+ * `TeeML` and an acknowledged signer are read off the chain for free. Whether the provider's
+ * broker forwards a request body unmodified is not on the chain at all — it costs a billed
+ * request to find out — and a provider that translates is not broken, not disabled and not
+ * failing. It is doing what 0G documents; the consequence is only which half of the proof a
+ * contract can bind.
+ *
+ * So this gets its own vocabulary and its own treatment: a small typographic stamp in ink, never
+ * a verdict colour, never the reserved accent, and never the achromatic geometry the proof
+ * channel owns. The one thing it must never look like is the broken-proof state on a writ page.
+ */
+function Compat({ record }: { record: PassthroughRecord | null }) {
+  const { label, note } = measurementSummary(record?.status ?? null)
+  return (
+    <div className="stamp" data-state={record?.status ?? 'unmeasured'}>
+      <span className="mark">{label}</span>
+      <span className="when">
+        {record
+          ? `measured ${measuredOn(record.measuredAt)}${record.origin === 'mainnet-record' ? ' · 0G mainnet, recorded here' : ' · in this browser'}`
+          : 'never checked'}
+      </span>
+      <span className="why">{note}</span>
+    </div>
+  )
+}
+
+/**
+ * How a measurement gets made, and why the page will not make one for you.
+ *
+ * Deliberately not a button that fires on load, or at all: the check is a real inference request
+ * against a real provider and it is billed to whoever runs it. Firing one per provider to
+ * decorate a list would spend a stranger's balance to render a caption. So the page hands over
+ * the exact command and takes the answer back.
+ */
+function MeasurePanel({ selected, onRecord }: { selected: string; onRecord: (r: PassthroughRecord) => void }) {
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState('')
+  const [problem, setProblem] = useState<string | null>(null)
+  const [saved, setSaved] = useState<PassthroughRecord | null>(null)
+
+  const command = `pnpm tsx examples/check-provider.ts ${selected || '<provider address>'} --json`
+
+  function submit() {
+    const result = parseMeasurement(text)
+    if (!result.ok) {
+      setProblem(result.reason)
+      setSaved(null)
+      return
+    }
+    onRecord(result.record)
+    setProblem(null)
+    setSaved(result.record)
+    setText('')
+  }
+
+  return (
+    <div className="measured">
+      <button className="disclose cond" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? '−' : '+'} how request binding is measured
+      </button>
+
+      {open ? (
+        <div className="body">
+          <p>
+            0G&rsquo;s broker takes a portable OpenAI-schema request and rewrites some of it before forwarding it
+            upstream — <code>max_tokens</code> ↔ <code>max_completion_tokens</code>, <code>reasoning_effort</code> into
+            one of five upstream dialects, and the <code>model</code> field to the upstream id. It then signs{' '}
+            <b>what it forwarded</b>. Where that happens, no contract can rebuild the hash the enclave signed, and a
+            gate pinned to that provider can never settle. Where it does not, the body passes through untouched and
+            everything on this page works.
+          </p>
+          <p>
+            The response half is unaffected either way, and matched on every provider tested. This is a property of
+            the provider, not a flaw in it — and it is a property to measure, because 0G&rsquo;s own client-side check
+            cannot see it: <code>Verifier.verifySignature</code> verifies the signature over whatever text the
+            provider returned, so a translated request still reads as verified.
+          </p>
+          <p>
+            Running the check sends one billed inference request, so this page does not run it for you — not on load,
+            and not per provider. Run it yourself in <code>sdk/</code>:
+          </p>
+          <pre className="code">{command}</pre>
+          <p className="hint">
+            Then paste the JSON it prints. It is kept in this browser only, alongside the mainnet run of 2026-08-27
+            that ships with the app, and the newer of the two is what the list shows.
+          </p>
+          <textarea
+            aria-label="paste a measurement"
+            value={text}
+            spellCheck={false}
+            placeholder="{ &quot;provider&quot;: &quot;0x…&quot;, &quot;status&quot;: &quot;passthrough&quot;, … }"
+            style={{ minHeight: 88 }}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
+            <button className="disclose cond" onClick={submit}>
+              record this measurement
+            </button>
+            {saved ? (
+              <span className="pms">
+                recorded {saved.status} for {saved.provider.slice(0, 10)}…, measured {measuredOn(saved.measuredAt)}
+              </span>
+            ) : null}
+          </div>
+          {problem ? (
+            <div style={{ marginTop: 12 }}>
+              <Gap title="That was not recorded">
+                <p>{problem}</p>
+              </Gap>
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </div>
   )
