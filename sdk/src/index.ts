@@ -18,6 +18,18 @@ export {
 } from './inference.js'
 export { fetchProof, signatureUrl, type TeeProof } from './proof.js'
 export {
+  checkProviderPassthrough,
+  probeRequestBody,
+  translatableFields,
+  requestHash,
+  type PassthroughStatus,
+  type PassthroughReport,
+  type PassthroughEvidence,
+  type PassthroughBrokerLike,
+  type CheckProviderOptions,
+  type ServiceView,
+} from './passthrough.js'
+export {
   archiveTranscript,
   uploadTranscript,
   serializeTranscript,

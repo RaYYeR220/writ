@@ -20,7 +20,8 @@
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "tsx examples/treasury-demo.ts"
+    "demo": "tsx examples/treasury-demo.ts",
+    "check-provider": "tsx examples/check-provider.ts"
   },
   "dependencies": {
     "@0gfoundation/0g-compute-ts-sdk": "0.9.0",
