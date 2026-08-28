@@ -11,12 +11,14 @@ is read-only and spends nothing.
 cast chain-id --rpc-url https://evmrpc.0g.ai      # 16661
 ```
 
-> **This file supersedes the deployment status in `README.md`, `CLAIMS.md`, `MOCKS.md`,
-> `JUDGES.md` and `docs/architecture.md`.** Those were written before the deployment and still say
-> "nothing is deployed". [The five things they list as never run](#what-those-documents-said-and-what-actually-changed)
-> have now been run, and this file is the evidence. Nothing else in them changed — in particular
-> **`EVAL.md` is still correct as written**: the graded evaluation has still only ever run on a
-> local fork against a stand-in signer. See [what is still not proven](#what-is-still-not-proven).
+> **This file is the authority on deployment status.** `README.md`, `CLAIMS.md`, `MOCKS.md`,
+> `JUDGES.md` and `docs/architecture.md` were all written while nothing was deployed, and where any
+> of them still says so, this file supersedes it.
+> [The five things `CLAIMS.md` §6 listed as never run](#what-those-documents-said-and-what-actually-changed)
+> have now been run, and what follows is the evidence. Nothing else in those documents changed — in
+> particular **`EVAL.md` is still correct as written**: the graded evaluation has still only ever run
+> on a local fork against a stand-in signer, and this deployment does not change that. See
+> [what is still not proven](#what-is-still-not-proven).
 
 ---
 
@@ -584,9 +586,9 @@ fifth is no longer true:
 | 6.4 | No proof from a real enclave notarized | two, both recovering to `0xA46EA4FC…` |
 | 6.5 | The deployer wallet is unfunded | it is funded; that is what unblocked the rest |
 
-`5.5` and `1.11` remain accurate about the eval; `EVAL.md` is unchanged and correct. The remaining
-"nothing is deployed" banners in `README.md`, `JUDGES.md`, `MOCKS.md` and `docs/architecture.md`
-predate this file and are superseded by it.
+`5.5` and `1.11` remain accurate about the eval, and `EVAL.md` is correct as written. Wherever
+`README.md`, `JUDGES.md`, `MOCKS.md` or `docs/architecture.md` still carries a "nothing is deployed"
+banner, it predates this file and this file wins.
 
 ---
 
