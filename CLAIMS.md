@@ -19,9 +19,10 @@ Last reviewed: 2026-08-26.
 | **MODELED** | Reasoned or derived, not measured end to end. Say so out loud. |
 | **NOT-CLAIMED** | Deliberately not asserted. Listed anyway. |
 
-**Nothing is deployed.** There is no `WritRegistry` on mainnet, no gate, no transaction hash. Every
-address in this repository is either 0G's own or is written as
-`<UNDEPLOYED — no address exists yet>`. No claim below depends on a deployment.
+**The suite is deployed to 0G mainnet and two decisions have settled through it** — see [§6](#6-what-has-been-run-on-mainnet-and-what-still-has-not)
+for the addresses, the two writs, and the transcript roots the 0G Storage indexer serves. Everything
+in this file that does not carry a mainnet address is still reproducible without one: no key, no
+funds, and for most of it no network.
 
 ---
 
@@ -62,6 +63,10 @@ All read live from chain 16661 on **2026-08-26**. Live state changes; re-run the
 | 2.11 | `GET {providerUrl}/v1/proxy/signature/{chatID}?model=…` is public and unauthenticated | VERIFIED-LIVE | unauthenticated probe, day-0 spike |
 | 2.12 | Proofs expire. A live mainnet provider answers an unknown chat id with, verbatim, `{"error":"prepare HTTP request: Chat id not found or expired, chat_id_not_found"}` | VERIFIED-LIVE | same probe |
 | 2.13 | The signature endpoint returns `text` and `signature`; `signing_address` is advisory and is ignored in favour of the on-chain `teeSignerAddress` | REPRODUCIBLE | `sdk/src/proof.ts`, `sdk/test/proof.test.ts`; the field is documented as a hint in `0g-pc-e2ee/protocol/proof/proof.go:39-43` |
+| 2.14 | **A provider's broker may rewrite the request body before forwarding it upstream, and then sign what it forwarded.** Measured live on four acknowledged TeeML providers with a minimal body — `model` and `messages`, nothing `docs/design/request-translation.md` names as translatable. `0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D` (`glm-5.2`) and `0x25F8f01cA76060ea40895472b1b79f76613Ca497` (`openai/gpt-5.4-mini`) signed the exact bytes that were sent. `0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9` (`0GM-1.0-35B-A3B`) and `0xf56fAaf9989aDafDDf26fa5Ffdd03a9A27b38fAE` (`0GM-1.0-35B-A3B-SIA`) signed a different request hash | VERIFIED-LIVE, **dated 2026-08-27** | `cd writ/sdk && pnpm tsx examples/check-provider.ts <provider>`. See NOT-CLAIMED #30 |
+| 2.15 | **The response half matched byte for byte on all four.** Response binding was unaffected by translation everywhere it was measured | VERIFIED-LIVE, **dated 2026-08-27** | same command; the `--json` output carries both hashes for each half |
+| 2.16 | A translating provider's own answer reports `"model":"0GM-1.0-35B-A3B-0427"` while the registry publishes that provider as serving `0GM-1.0-35B-A3B` — independent corroboration that the broker rewrote the `model` field | VERIFIED-LIVE | the raw response body of the first live mainnet run, 2026-08-27 |
+| 2.17 | **Which case a provider is in is a property to measure, not to assume.** It cannot be read from the registry: `verifiability`, `teeSignerAcknowledged` and `teeSignerAddress` are all identical between the two passthrough providers and the two translating ones | VERIFIED-LIVE | `getAllServices(0, 50)` next to the four measurements in 2.14 |
 
 Reproduce the census:
 
@@ -97,7 +102,7 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 4.1 | 118 SDK tests and 145 MCP tests pass, counted 2026-08-26 | REPRODUCIBLE | `cd writ/sdk && pnpm test`; `cd writ/mcp && pnpm test`. One of the 118 (`sdk/test/chain.test.ts`, "reads the live 0G mainnet registry's TEE providers through the SDK ABI") makes a real mainnet read, so the SDK suite needs network |
+| 4.1 | 134 SDK tests and 145 MCP tests pass, counted 2026-08-28 | REPRODUCIBLE | `cd writ/sdk && pnpm test`; `cd writ/mcp && pnpm test`. One of the 134 (`sdk/test/chain.test.ts`, "reads the live 0G mainnet registry's TEE providers through the SDK ABI") makes a real mainnet read, so the SDK suite needs network |
 | 4.2 | The SDK never hashes a re-serialized object. What is hashed is the exact wire bytes | REPRODUCIBLE | `sdk/src/inference.ts` reads the response with `res.text()` and hashes it as-is; `sdk/test/hashes.test.ts`, `sdk/test/inference.test.ts` |
 | 4.3 | The SDK refuses a streaming request before any network call, because a stream has no single signable body | REPRODUCIBLE | `sdk/src/inference.ts::assertNotStreaming`; eval scenario `trap-streaming-request` |
 | 4.4 | The SDK's and the app's hand-written ABIs match the compiled artifacts — every selector, every event topic hash, **and the field names and order of every returned struct** | REPRODUCIBLE | `sdk/test/abi.test.ts` compiles the Foundry project and compares; `app/test/abi.test.ts` does the same for the browser ABIs. The return-shape half is not optional — see the methodology lesson at the end of this file for the drift it exists to catch |
@@ -110,6 +115,9 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 | 4.11 | The MCP server detects a proof gone stale against the gate's live state and says *why* — including "a stranger deposited into the treasury" — instead of retrying | REPRODUCIBLE | `mcp/src/question.ts::explainDrift`, `mcp/src/tools/execute.ts::driftAgainst`; `mcp/test/execute.test.ts` (26 tests) |
 | 4.12 | The MCP server keeps the 0G SDKs' `console.log` off `stdout`, which would otherwise corrupt the JSON-RPC stream | REPRODUCIBLE | `mcp/src/stdio-guard.ts`; `mcp/test/stdio-guard.test.ts` |
 | 4.13 | An outcome is read from the emitted event, never inferred from the fact that a transaction mined | REPRODUCIBLE | `mcp/src/tools/execute.ts::decisionFrom`; a missing decision event is reported as an error, not guessed |
+| 4.14 | `checkProviderPassthrough` measures whether a provider's broker forwards a request body unmodified, and distinguishes `passthrough`, `response-only` and `unusable`. It never reports `passthrough` on incomplete evidence: an unreachable provider, an unfetchable proof, an unparseable signed text and a signature that does not recover to the registered TEE signer all come back as `unusable` with the reason | REPRODUCIBLE | `sdk/src/passthrough.ts`; `sdk/test/passthrough.test.ts` (16 tests) covers each refusal separately, including a proof whose halves both match but whose signature is a stranger's |
+| 4.15 | The check verifies the signature **before** comparing hashes, and against the TEE signer 0G's registry publishes — never against the address the provider volunteers | REPRODUCIBLE | `sdk/src/passthrough.ts`; `sdk/test/passthrough.test.ts`, "refuses a proof signed by anyone other than the registered TEE signer" |
+| 4.16 | The check refuses to spend anything on a provider the registry already disqualifies — not TeeML, signer not acknowledged, or the zero signer — so a disqualified provider costs one `eth_call` and no tokens | REPRODUCIBLE | `sdk/test/passthrough.test.ts` asserts no `fetch` call is made in each of those three cases |
 
 ## 5. The evaluation
 
@@ -122,19 +130,22 @@ cd writ/contracts && forge test --match-path test/WritRegistry.fork.t.sol -vv
 | 5.5 | No `--live` run has been performed | — | `EVAL.md` § "Scorecard — `--live`" is empty and says why |
 | 5.6 | **A scorecard is only valid for the contract and harness revision it ran against, and this one has been superseded twice.** The first committed run (block 42693145, 2026-08-26T13:16:49Z) predated the reshape that moved notarization out of the settle path and turned the transcript root into an append-only list. `eval/run.ts` still called the six-argument `execute`, so it **stopped reproducing silently** — a stale artifact keeps reading fine. It was brought forward and re-run at block 42716521 under answer key v3. That run has since been superseded in turn, deliberately this time, by v4: five centralized-routing scenarios added and recipient addresses made seed-derived. The run 5.2 reports is block **42720784** (2026-08-26T20:38:30Z) | fact, stated because the first failure mode is invisible | The artifact records its own fork block, timestamps and answer-key version, so a reader can check provenance without trusting this row. **The rule that follows: after any change to a contract or to the harness, `eval/results/fork.json` must be regenerated before it is cited — and every document quoting it re-swept in the same commit.** A scorecard that no longer reproduces looks exactly like one that does. **This row's own siblings drifted for exactly that reason and it is worth admitting:** `CLAIMS.md` and `MOCKS.md` sat at 38 scenarios for a while after `EVAL.md` and the artifact had moved to 43. Two honesty documents disagreeing is worse than either number, and the second half of the rule above exists because of it |
 
-## 6. What has never been run
+## 6. What has been run on mainnet, and what still has not
 
-Listed as claims because their absence is itself a claim about what this project has and has not
-shown.
+This section used to be a list of things that had never happened. It is kept in the same place
+because the shape of the claim has not changed — what a project has *not* done is as much a claim
+as what it has — but the first five rows are now the other way round. All read live from chain
+16661 on **2026-08-28**.
 
 | # | Statement | Tier |
 |---|---|---|
-| 6.1 | No contract has been deployed to 0G mainnet or to Galileo testnet | fact |
-| 6.2 | No inference has been run against a live 0G Compute provider by this codebase | fact |
-| 6.3 | **No transcript has ever been uploaded to, or downloaded from, 0G Storage by this codebase.** The real uploader and the real downloader are both wired and both reachable without any flag — `mcp/src/runtime.ts` constructs a real `Indexer` against `https://indexer-storage-turbo.0g.ai` for both directions, and `app/src/lib/storage.ts` fetches transcript bytes from that indexer straight from the browser. Neither has ever been pointed at a live deployment, because there is none. Every test injects a stub | fact |
-| 6.4 | No proof produced by a real Intel TDX enclave has been notarized | fact |
-| 6.5 | The deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` is unfunded, which is why | fact |
-| 6.6 | Cost estimates for mainnet operation are derived from measured gas × the live gas price, not from a paid transaction | MODELED |
+| 6.1 | The suite is deployed to 0G mainnet: `WritRegistry` `0x857D288652e4f4523347EFf1918B9E1263A574f4`, `PolicyGateFactory` `0x4320Ae51D672f2636a0faFfb2B28C5520013b6D7`, `AgentTreasury` `0x2688059e106195941F320110bE2d5fe9a1c75fEE` | VERIFIED-LIVE |
+| 6.2 | Inference has been run against a live 0G Compute provider by this codebase, and two writs are on the registry — `0x3d5c0087…` (`ALLOW:15`, 0.01 0G released) and `0xf2009042…` (`DENY:95` on 1.9 0G, held). Both are chat-format proofs from provider `0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D`, notarized 2026-08-28 | VERIFIED-LIVE |
+| 6.3 | Transcripts have been uploaded to 0G Storage and read back from it. Each of the two writs lists one transcript root, and `GET https://indexer-storage-turbo.0g.ai/file?root=0x74cb4118…` / `…?root=0x312a8684…` return the archived JSON | VERIFIED-LIVE |
+| 6.4 | A proof from a provider 0G's registry publishes as acknowledged TeeML has been notarized on mainnet, and it recovers to the `teeSignerAddress` that registry names. **Whether the hardware behind that key is a genuine Intel TDX enclave is still not something Writ checks** — see NOT-CLAIMED #15 | VERIFIED-LIVE for the signature; the quote is unverified |
+| 6.5 | **The first mainnet `AgentTreasury`, `0xaF9C87f5Eb7c3c5ebb16AcBa23C6cD25faCcAd63`, can never settle a decision.** It is pinned to a provider whose broker translates the request, so the hash it rebuilds on chain will never be the hash the enclave signed. It is deliberately not hidden: it is the artifact that surfaced NOT-CLAIMED #30, and the redeployment at `0x2688059e…` is pinned to a provider that was measured first | fact |
+| 6.6 | No contract has been deployed to Galileo testnet | fact |
+| 6.7 | Gas figures in this file are still measured gas × the live gas price rather than a reconciliation of what the mainnet transactions actually cost | MODELED |
 
 ## 7. The web app
 
@@ -145,11 +156,14 @@ treasury: balance, policy, ledger, recovery countdown).
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 7.1 | 105 app tests pass, counted 2026-08-26 | REPRODUCIBLE | `cd writ/app && pnpm test`. **No app test touches a network** — `fetch` is stubbed and chain reads go through an injected source surface |
+| 7.1 | 126 app tests pass, counted 2026-08-28 | REPRODUCIBLE | `cd writ/app && pnpm test`. **No app test touches a network** — `fetch` is stubbed and chain reads go through an injected source surface |
 | 7.2 | The app's hand-written ABIs match the compiled artifacts, including the return shape of `getWrit` and the absence of a `transcriptRoot` field | REPRODUCIBLE | `app/test/abi.test.ts` |
-| 7.3 | A reader re-checks a writ **in their own browser**: the transcript bytes are fetched from 0G Storage, content-addressed against the merkle root, re-hashed to `reqHash`/`respHash`, and the signature is recovered against the on-chain `teeSignerAddress` | REPRODUCIBLE for the logic, **never exercised against live 0G Storage** | `app/src/lib/verify.ts`, `app/src/lib/storage.ts`, `app/src/lib/zg-merkle.ts`; `app/test/verify.test.ts` (24), `app/test/storage.test.ts` (9) — all against stubbed `fetch`. See 6.3 |
+| 7.3 | A reader re-checks a writ **in their own browser**: the transcript bytes are fetched from 0G Storage, content-addressed against the merkle root, re-hashed to `reqHash`/`respHash`, and the signature is recovered against the on-chain `teeSignerAddress` | REPRODUCIBLE; the two live writs exercise it end to end | `app/src/lib/verify.ts`, `app/src/lib/storage.ts`, `app/src/lib/zg-merkle.ts`; `app/test/verify.test.ts` (24), `app/test/storage.test.ts` (9) — all against stubbed `fetch`, so the *tests* touch no network. The live path is 6.3 |
 | 7.4 | The app carries its own port of 0G Storage's merkle-root algorithm rather than shipping the storage SDK to the browser | REPRODUCIBLE, with the caveat in 7.5 | `app/src/lib/zg-merkle.ts`; `app/test/zg-merkle.test.ts`, 8 vectors across 12 tests |
 | 7.5 | **Those 8 vectors are frozen constants, not a live comparison against the storage SDK.** They were captured from `@0gfoundation/0g-storage-ts-sdk@1.2.11` and committed as hex, so the test catches a regression in our port but would **not** catch a change upstream in the SDK | fact **(found here, comment fixed)** | `app/test/zg-merkle.test.ts` imports only `vitest` and the local module. `zg-merkle.ts`'s header used to claim the port was "checked against that package directly, so a change upstream shows up as a failing test"; it now says what the test actually does. The vectors are frozen on purpose — `app` does not depend on the storage SDK (it is installed only under `sdk/`), and pulling its Node-only dependencies into the app to re-derive a hash was not worth it. Re-capture them if the SDK version moves |
+| 7.6 | Studio shows request-binding compatibility as a **third state**, separate from verdict colour and from the achromatic proof channel, and never runs the check itself — it costs a billed inference request, so the page hands over the command and takes the measurement back | REPRODUCIBLE | `app/src/lib/passthrough.ts`, `app/src/components/Studio.tsx`; `app/test/passthrough.test.ts` (14 tests), including one asserting that no state is ever described as broken or failed |
+| 7.7 | An unmeasured provider is shown as unmeasured. The app never defaults a provider to passing | REPRODUCIBLE | `app/test/passthrough.test.ts`, "reports nothing at all for a provider nobody has measured" |
+| 7.8 | The docket watches gates the factory did not deploy, and reports a configured address that does not answer as a gate rather than listing it with no decisions | REPRODUCIBLE | `app/src/lib/docket.ts::discoverGates`; `app/test/docket.test.ts` (7 tests) |
 
 ---
 
@@ -598,6 +612,65 @@ by signature recovery against 0G's registered TEE signer, independently of every
 archive is a convenience for reconstructing the bytes; it is not, and must never become, part of
 the trust chain.
 
+### 30. On-chain request binding requires a provider whose broker forwards the body unmodified **(found on live mainnet)**
+
+**Writ does not claim that its prompt-swap defence works against every 0G provider. It works
+against a provider that passes the request through, and which providers do is measured rather than
+assumed.**
+
+0G's broker accepts a portable OpenAI-schema chatbot request and, before forwarding it upstream,
+rewrites certain fields into the third-party schema the target model actually understands —
+`0gfoundation/0g-serving-broker`, `docs/design/request-translation.md`. The document names
+`max_tokens` ↔ `max_completion_tokens`, `reasoning_effort` mapped into one of five upstream
+dialects, and notes that "model validation may already have rewritten" the `model` field to the
+upstream id. Translation is driven by the model's advertised `supportedParameters`. The broker then
+signs **the translated body**. The same document says that a model advertising nothing translatable
+gets its body passed through untouched.
+
+`TreasuryGate.execute` rebuilds the exact request bytes on chain and derives the writ id from
+`sha256` of them. Where the broker translates, the enclave signed a hash of bytes no contract can
+reproduce, so the writ the gate computes is not the writ the proof supports and the decision can
+never settle. **Response binding is unaffected** — the response is hashed exactly as delivered — so
+what is lost is the ability to prove *which question was asked*, which is the entire prompt-swap
+defence.
+
+**How it was found.** On the first live end-to-end run against 0G mainnet, 2026-08-27, the SDK's own
+guard refused to notarize: `provider signed "2dbfc853…:af714102…", which is not this request and
+response`. Probing the halves separately, `sha256(response)` matched byte for byte and
+`sha256(request)` did not. Naive reconstructions were tried and rejected — the model id swapped to
+the versioned form, a `JSON.parse` round trip, an added `stream:false`, and combinations. The
+transformation is not something a contract can reproduce.
+
+**The measurement**, taken the same day with a minimal body carrying nothing translatable:
+
+| provider | model | request | response |
+|---|---|---|---|
+| `0x4870CbC4D07d6Ac2EE5aA865588e5985FE77a4E9` | `0GM-1.0-35B-A3B` | differs | matches |
+| `0xf56fAaf9989aDafDDf26fa5Ffdd03a9A27b38fAE` | `0GM-1.0-35B-A3B-SIA` | differs | matches |
+| `0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D` | `glm-5.2` | **matches** | matches |
+| `0x25F8f01cA76060ea40895472b1b79f76613Ca497` | `openai/gpt-5.4-mini` | **matches** | matches |
+
+**Response binding held on every provider tested.** Two of four passed the request through. Nothing
+in the registry distinguishes the two groups: all four are acknowledged TeeML with a non-zero TEE
+signer. That is why `checkProviderPassthrough` exists and why Studio shows an unmeasured provider
+as unmeasured rather than as fine.
+
+**This is a property of 0G's broker, not a defect we worked around, and only an on-chain
+reconstruction could have surfaced it.** 0G's own client-side check cannot see it: as NOT-CLAIMED #2
+sets out, `Verifier.verifySignature` verifies the signature over whatever `text` the provider
+returned, so a translated request still reads as verified. **That is a scope limitation of a
+client-side convenience helper, not a vulnerability** — the helper is a signature check, not a
+binding check, and 0G's own documentation says the client is the party holding the bytes. What
+changes here is that rebuilding the request *inside the contract* turns a scope limitation into a
+visible one: the contract had to compute the hash itself, and the moment it did, the divergence had
+nowhere to hide.
+
+Two consequences are carried in the code rather than in this paragraph. A `passthrough` verdict is
+a measurement of the body that was actually sent, so it does not license adding `max_tokens` or
+`reasoning_effort` to a gate's prompt afterwards — `translatableFields` exists to notice that. And
+the first mainnet deployment is pinned to a translating provider and is kept rather than removed;
+see 6.5.
+
 ---
 
 ## Found here, and since fixed
@@ -716,13 +789,13 @@ forge test --gas-report
 # a dry run of the deployment. Reads 0G mainnet, broadcasts nothing, costs nothing.
 forge script script/Deploy.s.sol --fork-url https://evmrpc.0g.ai
 
-# sdk: 118 tests (one makes a real mainnet read)
+# sdk: 134 tests (one makes a real mainnet read)
 cd ../sdk && pnpm install && pnpm test
 
 # mcp: 145 tests, no chain at all
 cd ../mcp && pnpm install && pnpm test
 
-# app: 105 tests, no network at all
+# app: 126 tests, no network at all
 cd ../app && pnpm install && pnpm test
 
 # the graded evaluation, on a fork of 0G mainnet. Regenerate this after ANY change to a

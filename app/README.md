@@ -94,6 +94,29 @@ So they run on separate channels:
 The proof channel also keeps its own vocabulary: a check is *checked*, *broken*, or *not run*. It
 never says held, released, allowed or refused.
 
+### A third state, which is neither
+
+Studio lists every provider 0G's registry publishes and disables the ones a gate could not use,
+with the registry's own reason next to each. There is a third thing a provider has to be, and it is
+not on the chain: **its broker has to forward the request body unmodified.** 0G's broker rewrites
+some requests before forwarding them upstream and signs what it forwarded, and where that happens no
+contract can rebuild the hash the enclave signed — so a gate pinned to that provider can never
+settle, however impeccable its `TeeML` registration is. The response half is unaffected.
+
+That is neither a verdict nor a proof state, and it borrows neither language. It is not blue or
+gold, it is not on the seam, and it never uses the achromatic geometry the proof channel owns — a
+provider that translates is not broken, it is doing what 0G documents. It gets a small typographic
+stamp under the provider, a three-step tonal ladder in ink, and a date: *binds request + response*,
+*binds response only*, *could not be measured*, or *request binding not measured*.
+
+The last one is the important one. **An unmeasured provider is shown as unmeasured**, never as
+fine. Measuring costs one billed inference request, so the page does not run the check for you — not
+on load, not per provider, not at all. It hands over the command
+(`pnpm tsx examples/check-provider.ts <provider> --json` in `sdk/`) and takes the answer back, keeps
+it in this browser, and says when it was measured. Four providers measured on 0G mainnet on
+2026-08-27 ship with the app, labelled as the dated record they are rather than as something this
+page checked.
+
 ### Below 820px
 
 The seam has nowhere to live in one column, so it becomes edge-on: the verdict colour is the row's
@@ -138,7 +161,7 @@ writ page says so where a reader will see it.
 pnpm test
 ```
 
-105 tests, in seven files:
+126 tests, in nine files:
 
 - `verify.test.ts` — the four checks over real sha256 and real EIP-191 signatures. A sound proof
   passes; an edited question fails on hashes; an edited answer fails on hashes; a signature from a
@@ -154,3 +177,10 @@ pnpm test
 - `storage.test.ts` — the content-addressed fetch, including every way it can refuse.
 - `transcript.test.ts` — parsing, and the verdict grammar read exactly as `VerdictLib` reads it.
 - `presentation.test.ts` — amounts truncate rather than round, distance-from-seam, refusal naming.
+- `docket.test.ts` — gate discovery: a gate the factory deployed, a gate it was told about, the
+  same gate named twice in different case, an address that does not answer as a gate, and an entry
+  that is not an address at all. Every failure has to surface as a stated problem rather than a
+  missing row or a phantom one.
+- `passthrough.test.ts` — the request-binding record: which measurement wins when there are two,
+  what a pasted measurement has to carry before it is kept, and the rule that an unmeasured
+  provider is shown as unmeasured rather than as fine.

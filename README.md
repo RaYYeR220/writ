@@ -237,9 +237,11 @@ archive is deliberately **not** part of the trust chain: a root is a claim by wh
 it, it lives in an append-only candidate list rather than in the `Writ` struct, and a consumer
 that finds no candidate re-deriving must report `unavailable`, never `fail`.
 
-**Honest caveat on that third one:** the real uploader and the real downloader are both wired, in
-three independent implementations, and **neither has ever been run against the live indexer**,
-because nothing is deployed to point them at. See [`MOCKS.md`](MOCKS.md).
+**Honest caveat on that third one:** the real uploader and the real downloader are wired in three
+independent implementations, and only one of them — the SDK's — has actually run against the live
+indexer. Both mainnet writs carry a transcript root that `https://indexer-storage-turbo.0g.ai`
+serves; the app's browser-side download and the MCP server's are still exercised only against
+stubbed `fetch`. See [`MOCKS.md`](MOCKS.md).
 
 Remove 0G Compute and there is no signature to verify. Remove same-chain 0G Chain and the
 verification needs a bridge or an oracle, at which point the guarantee is theirs and not the
@@ -252,18 +254,18 @@ enclave's. Remove 0G Storage and the record stops being readable by anyone but i
 | Directory | What it is | Tests |
 |---|---|---:|
 | [`contracts/`](contracts) | Solidity 0.8.24. `WritLib` (text reconstruction + recovery), `VerdictLib` (verdict grammar), `PromptLib` (the `"model"` splice), `WritRegistry` (the permanent record, ownerless and non-upgradeable), `PolicyGate` (abstract base), `TreasuryGate` / `AgentTreasury` (the reference gate), `PolicyGateFactory`, `script/Deploy.s.sol` | **217** — 213 unit + 4 against a live 0G mainnet fork |
-| [`sdk/`](sdk) | TypeScript client. Raw-byte inference, proof capture, local verification before anything is paid for, 0G Storage archival, notarization. Never hashes a re-serialized object | **118** |
+| [`sdk/`](sdk) | TypeScript client. Raw-byte inference, proof capture, local verification before anything is paid for, 0G Storage archival, notarization, and `checkProviderPassthrough` — the preflight that measures whether a provider's broker forwards a request body unmodified. Never hashes a re-serialized object | **134** |
 | [`mcp/`](mcp) | MCP server — `writ_preview_question`, `writ_attest`, `writ_execute`, `writ_lookup`. Any MCP-speaking agent can produce and settle its own attested decisions. Install notes: [`mcp/README.md`](mcp/README.md) | **145** |
-| [`app/`](app) | Next.js 16 / React 19 docket. `/` every decision, `/writ/[id]` one proof chain as four independently checkable rows plus a live tamper demo, `/studio` compose and deploy a policy, `/gate/[address]` one treasury. Notes: [`app/README.md`](app/README.md) | **105** |
+| [`app/`](app) | Next.js 16 / React 19 docket. `/` every decision, `/writ/[id]` one proof chain as four independently checkable rows plus a live tamper demo, `/studio` compose and deploy a policy, `/gate/[address]` one treasury. Notes: [`app/README.md`](app/README.md) | **126** |
 | [`eval/`](eval) | Pre-registered scenarios, graded against a committed answer key, run end to end through the real SDK and the real contracts | 43 scenarios |
 
-**585 tests in total**, all re-run on 2026-08-26 for this README. Counts per suite:
+**622 tests in total**, all four suites re-run on 2026-08-28 for this README. Counts per suite:
 
 ```
 contracts   217 passed, 0 failed    (forge test — includes the fork suite, so it needs network)
-sdk         118 passed              (one test makes a real mainnet read)
+sdk         134 passed              (one test makes a real mainnet read)
 mcp         145 passed              (no chain, no network)
-app         105 passed              (no chain, no network)
+app         126 passed              (no chain, no network)
 ```
 
 The graded evaluation's committed scorecard (`eval/results/fork.json`, read back for this README):
@@ -285,8 +287,9 @@ Supporting documents: [`CLAIMS.md`](CLAIMS.md) (every claim, tiered, plus NOT-CL
 
 ## Quick start
 
-Needs Node 24, pnpm, and Foundry. **Zero credentials, zero funds.** The only network access is
-read-only RPC against 0G mainnet.
+Needs Node 24, pnpm, and Foundry. **Everything below needs zero credentials and zero funds** — the
+only network access is read-only RPC against 0G mainnet. The one command in this repository that
+spends anything is called out separately at the end of this section.
 
 ```bash
 git clone --recurse-submodules <this repo>
@@ -307,9 +310,9 @@ forge test --match-test measures -vv
 forge script script/Deploy.s.sol --fork-url https://evmrpc.0g.ai
 
 # ── the TypeScript side
-cd ../sdk && pnpm install && pnpm test     # 118
+cd ../sdk && pnpm install && pnpm test     # 134
 cd ../mcp && pnpm install && pnpm test     # 145
-cd ../app && pnpm install && pnpm test     # 105
+cd ../app && pnpm install && pnpm test     # 126
 
 # ── the local world: anvil forks 0G mainnet, the contracts deploy onto it, and 43
 #    pre-registered scenarios run end to end through the real SDK and the real registry.
@@ -322,10 +325,20 @@ registered through that contract's own `addOrUpdateService` — paying the stake
 — and acknowledged through its own `acknowledgeTEESignerByOwner`. Exactly one value is
 substituted: the TEE private key, because an enclave key cannot be extracted.
 
-To browse the docket, `cd app && cp .env.example .env.local && pnpm dev`. Every value is
-`NEXT_PUBLIC_` — the app has no privileged read, so a reviewer with the same values sees exactly
-the same pages. With no registry address set it states the gap on the page rather than rendering
-an empty view that would read as "no activity yet".
+One command that does spend something, and is worth the paragraph in the security model:
+
+```bash
+# needs WRIT_PRIVATE_KEY with a funded 0G compute ledger. Sends one minimal request.
+cd sdk && pnpm tsx examples/check-provider.ts 0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D
+```
+
+It reports `passthrough`, `response-only` or `unusable`, and exits 0, 1 or 2 so it can gate a
+deploy script. Nothing else in this repository spends anything.
+
+To browse the docket, `cd app && cp .env.example .env.local && pnpm dev`. The example file already
+points at the mainnet deployment. Every value is `NEXT_PUBLIC_` — the app has no privileged read, so
+a reviewer with the same values sees exactly the same pages. With no registry address set it states
+the gap on the page rather than rendering an empty view that would read as "no activity yet".
 
 ---
 
@@ -359,6 +372,28 @@ The acknowledgement is at least bound to the specific registration: changing the
 field by field on a mainnet fork. Changing only the URL or the prices does not, so a provider can
 silently repoint its endpoint.
 
+**On-chain request binding needs a provider whose broker forwards the body unmodified, and not
+every provider does.** 0G's broker takes a portable OpenAI-schema request and rewrites parts of it
+before forwarding — `max_tokens` ↔ `max_completion_tokens`, `reasoning_effort` into one of five
+upstream dialects, the `model` field to the upstream id — and then signs what it forwarded
+(`0g-serving-broker`, `docs/design/request-translation.md`). Where that happens the enclave signed a
+hash of bytes no contract can rebuild, so a gate pinned to that provider can never settle: the
+prompt-swap defence has nothing to stand on. **The response half is unaffected and matched on every
+provider we tested.** Measured live on 2026-08-27 across four acknowledged TeeML providers, two
+forwarded the request untouched and two did not, and nothing in the registry tells the two groups
+apart. So it is measured before a gate is pinned, in one command:
+
+```bash
+cd writ/sdk && pnpm tsx examples/check-provider.ts <provider address>
+```
+
+This is a property of 0G's broker rather than a flaw we worked around, and only an on-chain
+reconstruction could have surfaced it. 0G's own client-side check cannot: `Verifier.verifySignature`
+verifies the signature over whatever `text` the provider returned, so a translated request still
+reads as verified. That is a scope limitation of a convenience helper, not a vulnerability — but it
+is why our first mainnet treasury, `0xaF9C87f5Eb7c3c5ebb16AcBa23C6cD25faCcAd63`, can never settle a
+decision, and why it is still in the address table below.
+
 **Other limitations that are real, listed here and in full in [`CLAIMS.md`](CLAIMS.md):**
 
 - The TEE does not sign the model name. `PolicyGate` checks the model **0G's registry** names, not
@@ -373,7 +408,7 @@ silently repoint its endpoint.
 - The recovery hatch measures gate inactivity, not provider outage, and a deployed gate's agent
   and policy can never be changed.
 
-**[`CLAIMS.md`](CLAIMS.md) carries the complete NOT-CLAIMED list — 29 numbered entries plus four
+**[`CLAIMS.md`](CLAIMS.md) carries the complete NOT-CLAIMED list — 30 numbered entries plus four
 defects that were found here and fixed.** If you find a claim anywhere in this repository that is
 not in that file, treat the omission as an error and hold us to the file. If you find a limitation
 that is not in NOT-CLAIMED, we want to know.
@@ -470,19 +505,24 @@ window is charged to it. Never quote one without the mode that produced it.
 
 ## Deployed addresses
 
-> ### NOTHING IS DEPLOYED YET
->
-> There is no `WritRegistry` on 0G mainnet, no factory, no gate, and no transaction hash. The
-> deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` holds `0` — checked against
-> `https://evmrpc.0g.ai` while writing this. **This table is filled in at deployment and not
-> before.** No claim anywhere in this repository depends on a deployment, and there are no
-> placeholder hex strings anywhere that could be mistaken for one.
+Live on 0G mainnet, chain 16661. Two decisions have settled through the reference gate: writ
+`0x3d5c0087c25a13c5469252dbb60c4e24b4d27d8300fb3ce55b4cd9d9686137a0` (`ALLOW:15`, 0.01 0G released)
+and writ `0xf20090422eefd17f52b10ea8c38fe2957a886112dbabaa1c222f1cfb4345d31a` (`DENY:95` on 1.9 0G,
+refused, funds stayed). Both are chat-format proofs from provider
+`0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D`, and each lists a transcript root the 0G Storage
+indexer serves.
 
 | Contract | Address |
 |---|---|
-| `WritRegistry` | `<UNDEPLOYED — no address exists yet>` |
-| `PolicyGateFactory` | `<UNDEPLOYED — no address exists yet>` |
-| `AgentTreasury` (reference gate) | `<UNDEPLOYED — no address exists yet>` |
+| `WritRegistry` | `0x857D288652e4f4523347EFf1918B9E1263A574f4` |
+| `PolicyGateFactory` | `0x4320Ae51D672f2636a0faFfb2B28C5520013b6D7` |
+| `AgentTreasury` (reference gate) | `0x2688059e106195941F320110bE2d5fe9a1c75fEE` |
+| `AgentTreasury`, first deployment — **kept, and it can never settle** | `0xaF9C87f5Eb7c3c5ebb16AcBa23C6cD25faCcAd63` |
+
+The first treasury is pinned to a provider whose broker translates the request, so the hash it
+rebuilds on chain will never be the hash the enclave signed. It is listed rather than quietly
+dropped: it is the artifact that surfaced the limitation above, and a deployment that cannot settle
+is more useful to be able to point at than a tidy table.
 
 0G's own infrastructure, which **is** real and is read live by the test suite:
 

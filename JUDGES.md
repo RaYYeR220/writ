@@ -207,7 +207,9 @@ mechanism mismatches; 28 answered adversarially, 15 supplied a correct answer.
 **That scorecard measures our enforcement machinery and nothing about model judgement.** On a fork
 the "TEE" is a key we generated, and whoever holds the key decides what the "model" says. The
 artifact says so about itself: `"modelBehaviourMeasured": false`. **No `--live` run has happened**
-— the deployer wallet is unfunded, and `EVAL.md`'s live scorecard is empty and says why.
+— `EVAL.md`'s live scorecard is empty and says why. Two real decisions have settled on mainnet
+through the reference gate, which is a different thing from a graded live run and is not counted as
+one.
 
 What the fork run *is* good for, and it is narrower than it sounds: `WritRegistry` verifies
 against **0G's real deployed `InferenceServing`** on the fork. The eval's provider was registered
@@ -236,14 +238,16 @@ trustworthy?", reproducible with `--scenarios <doctored key>`.
 | [#29](CLAIMS.md#29-unavailable-is-not-fail-and-the-distinction-is-load-bearing-found-here) | `unavailable` is not `fail` — grading a failed archive candidate as a failed writ is itself the attack |
 | [#28](CLAIMS.md#28-the-factorys-model-scan-is-a-byte-scan-not-a-json-parser-found-here) | The factory's `"model"` scan is a byte scan, not a JSON parser. An escaped spelling passes it. What makes that survivable is structural, not the check |
 | [#4](CLAIMS.md#4-proof-true-on-a-0g-storage-download-is-a-no-op-so-we-do-not-claim-proof-verified-download) | `proof: true` on a 0G Storage download is a no-op in the SDK, so we do not claim proof-verified download — we recompute the merkle root instead |
-| §6 | **What has never been run**: no deployment, no live TEE inference, no 0G Storage upload or download, no proof from a real enclave notarized |
+| [#30](CLAIMS.md#30-on-chain-request-binding-requires-a-provider-whose-broker-forwards-the-body-unmodified-found-on-live-mainnet) | **On-chain request binding needs a provider whose broker forwards the request body unmodified.** 0G's broker rewrites `max_tokens`, `reasoning_effort` and `model` for some models and signs what it forwarded, so a gate pinned to one of those can never settle. The response half is unaffected. Found on the first live mainnet run; measured on four providers, two of which pass the body through |
+| §6 | **What is still not claimed**: no Galileo deployment, no graded `--live` eval run, and no TDX quote verified — the mainnet proofs verify a signature against a key 0G's registry names |
 
 [`MOCKS.md`](MOCKS.md) is the companion: one table per test surface, naming every substitute and
 its path. The last section is a single grep-able list of everything fake in the repository.
 
-**Nothing is deployed.** Every address in this repository is either 0G's own or is literally
-`<UNDEPLOYED — no address exists yet>`. There is no placeholder hex anywhere that could be
-mistaken for a deployment, and no claim depends on one.
+**Every address in this repository is real** — 0G's own, or one of Writ's four mainnet
+deployments. That includes the first `AgentTreasury`, `0xaF9C87f5Eb7c3c5ebb16AcBa23C6cD25faCcAd63`,
+which is pinned to a translating provider and can never settle a decision. It is listed rather than
+removed: it is the artifact that surfaced NOT-CLAIMED #30.
 
 ---
 
@@ -297,9 +301,9 @@ proofs is bricked from birth.
 The rest of the suites, and the local world:
 
 ```bash
-cd ../sdk  && pnpm install && pnpm test    # 118
+cd ../sdk  && pnpm install && pnpm test    # 134
 cd ../mcp  && pnpm install && pnpm test    # 145
-cd ../app  && pnpm install && pnpm test    # 105
+cd ../app  && pnpm install && pnpm test    # 126
 cd ../eval && pnpm install && pnpm eval:fork
 ```
 

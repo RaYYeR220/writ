@@ -45,9 +45,12 @@ runtime constructs the real `Indexer` against `https://indexer-storage-turbo.0g.
 and download, with no `--live` guard, and the web app fetches transcript bytes from that indexer
 directly in the browser. The real integration is broader than that sentence admitted.
 
-What is true — and it is the claim that matters — is that **no upload and no download has ever
-actually executed**, because nothing is deployed to point any of it at. Every test injects a stub or
-stubs `fetch`. The correct statement is "never run", not "only reachable from `--live`".
+What is true — and it is the claim that matters — is that **no upload and no download executes in
+any test**. Every test injects a stub or stubs `fetch`. Outside the tests, the SDK's uploader has now
+run for real: both mainnet writs list a transcript root that
+`https://indexer-storage-turbo.0g.ai/file?root=…` serves. The app's browser-side downloader and the
+MCP server's have not been pointed at it. The correct statement is "not exercised by any test", not
+"only reachable from `--live`".
 
 ---
 
@@ -86,7 +89,7 @@ nothing.**
 **Nothing in this suite is mocked.** It is the only place in the repository where every input is
 0G's own.
 
-## 3. SDK tests — `writ/sdk`, 118 tests
+## 3. SDK tests — `writ/sdk`, 134 tests
 
 `pnpm test`.
 
@@ -98,6 +101,7 @@ nothing.**
 | Live mainnet read | **REAL** | one test (`chain.test.ts`, "reads the live 0G mainnet registry's TEE providers through the SDK ABI") queries mainnet directly through the SDK's hand-written ABI |
 | 0G Compute provider | **STAND-IN** | `test/helpers/provider-stub.ts` — a real `node:http` server on localhost implementing `POST /v1/proxy/chat/completions` and `GET /v1/proxy/signature/{chatId}`, which signs `sha256hex(request):sha256hex(response)` over **the exact bytes it received**. It can also be told to expire proofs, to sign the five-field routing text, or to sign an arbitrary pair (i.e. forge a proof for a different question) |
 | TEE key | **SUBSTITUTED** | an `ethers.Wallet` the test holds |
+| A translating broker | **STAND-IN** | `test/passthrough.test.ts` stubs `fetch` with a provider that can be told to sign a request hash over bytes the client never sent — the live behaviour of NOT-CLAIMED #30, reproduced offline. The real measurement is made by `examples/check-provider.ts`, which is not part of the suite because it spends money |
 | 0G Storage | **SUBSTITUTED** | `IndexerLike` is injected. The merkle-root computation itself is real (`MemData(...).merkleTree()` from the real SDK); only the network upload is replaced |
 | ABI fidelity | **REAL** | `abi.test.ts` compiles the Foundry project and compares every function selector and event topic hash against the hand-written ABIs |
 
@@ -130,7 +134,7 @@ line here is "never run", not "not wired".
 This suite deliberately has no chain: it tests the server's decisions, not the contracts'. The
 contracts are tested by suites 1 and 2, and the two are joined by suite 3.
 
-## 4a. Web app tests — `writ/app`, 105 tests
+## 4a. Web app tests — `writ/app`, 126 tests
 
 `pnpm test`. **No chain, no network, nothing stubbed out at the module boundary that is not named
 here.**
@@ -139,10 +143,11 @@ here.**
 |---|---|
 | The app itself — the docket, the writ detail page with its four checkable rows, the studio, the gate page | **REAL** — the shipping Next.js 16 / React 19 source |
 | Chain reads | **SUBSTITUTED in tests** — `app/src/lib/verify.ts` takes an injected `VerifySources`, and `app/src/lib/sources.ts::chainSources` (the real ethers implementation) is not exercised by any test |
-| 0G Storage download | **SUBSTITUTED in tests** — `vi.stubGlobal('fetch', …)`. The shipping `app/src/lib/storage.ts` does a real `GET {indexer}/file?root=…` and content-addresses the result; that path has never run against the live indexer |
+| 0G Storage download | **SUBSTITUTED in tests** — `vi.stubGlobal('fetch', …)`. The shipping `app/src/lib/storage.ts` does a real `GET {indexer}/file?root=…` and content-addresses the result; that path now has live data to run against — both mainnet writs list a root the indexer serves (see `CLAIMS.md` 6.3) |
 | The merkle root algorithm | **PORTED, not imported** — `app/src/lib/zg-merkle.ts` reimplements `AbstractFile.merkleTree` / `MerkleTree.build` for the browser rather than shipping the storage SDK. `app/package.json` does not depend on that SDK |
 | The 8 merkle vectors | **FROZEN CONSTANTS** — `app/test/zg-merkle.test.ts` compares against committed hex, **not** against the real package. A regression in our port fails this suite; an upstream change in the SDK would not. `zg-merkle.ts`'s header used to claim otherwise and now says what the test does; see `CLAIMS.md` 7.5 |
 | ABI fidelity | **REAL** — `app/test/abi.test.ts` compiles the Foundry project and compares selectors, event topic hashes **and return-tuple shapes**, including an explicit assertion that `getWrit` no longer carries a `transcriptRoot` |
+| Request-binding compatibility | **A DATED RECORD, NOT A MEASUREMENT THE APP MAKES** — the four entries in `app/src/lib/passthrough.ts` are the live mainnet run of 2026-08-27, typed in by hand. The page labels them as such, and labels a measurement pasted in from the CLI differently. The app never runs the check itself, because it is a billed inference request; see `CLAIMS.md` 7.6 |
 | Signature recovery, hashing | **REAL** — ethers in the browser, against the on-chain `teeSignerAddress` |
 
 ## 5. The graded evaluation, `--fork` mode — `writ/eval`, 43 scenarios
@@ -209,10 +214,12 @@ is a centralized provider** — those are the routing-proof scenarios. So a live
 against a centralized provider and 36 of 43 against a decentralized one, and every skip is printed
 with its reason and counted as a skip, never as a pass.
 
-Blocked on one thing: the deployer wallet `0xe1b27008710E5453fe021B521428B3DF074804DF` is unfunded,
-so there are no mainnet contracts to point it at and no 0G Compute ledger to pay a provider with.
-`--live` refuses to start without `WRIT_LIVE_CONFIRM=1`, because it moves real funds and spends real
-0G on inference and storage.
+The contracts a live run needs now exist on mainnet, so what remains is funding: `--live` spends
+real 0G on inference and storage for every scenario, and it refuses to start without
+`WRIT_LIVE_CONFIRM=1` for exactly that reason. A live run must also be pointed at a provider whose
+broker forwards the request body unmodified — `cd writ/sdk && pnpm tsx examples/check-provider.ts
+<provider>` — or every scenario that settles will fail for a reason that has nothing to do with the
+scenario. See `CLAIMS.md` NOT-CLAIMED #30.
 
 ---
 

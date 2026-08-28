@@ -13,16 +13,16 @@ line, read [`../MOCKS.md`](../MOCKS.md).
 Everything measured here was measured on 2026-08-26 with Foundry `forge 1.7.1`, `solc 0.8.24`,
 optimizer on at 200 runs, and against 0G mainnet (chain 16661) over `https://evmrpc.0g.ai`.
 
-**Nothing is deployed yet.** Every address in this document is either 0G's own or is written as
-`<UNDEPLOYED — no address exists yet>`. There are no placeholder hex strings anywhere in this repo
-that could be mistaken for a deployment.
+**Every address in this document is real.** 0G's own contracts, and Writ's four mainnet
+deployments, are in the [appendix](#appendix--deployed-addresses). There are no placeholder hex
+strings anywhere in this repo that could be mistaken for a deployment.
 
 ---
 
 ## Contents
 
 1. [The chain of custody](#1-the-chain-of-custody)
-2. [The signed text: exact byte layouts](#2-the-signed-text-exact-byte-layouts)
+2. [The signed text: exact byte layouts](#2-the-signed-text-exact-byte-layouts) — including [2.6, request translation](#26-request-translation-and-which-half-of-the-binding-survives-it)
 3. [EIP-191 reconstruction on chain](#3-eip-191-reconstruction-on-chain)
 4. [The reveal step](#4-the-reveal-step)
 5. [The nine-fact question](#5-the-nine-fact-question)
@@ -279,6 +279,76 @@ reaches Format C. Note that even it falls back to Format A when b64 images canno
 acknowledged. Should 0G ever acknowledge a separated-TEE provider, `WritRegistry` would compare the
 recovered address against `teeSignerAddress` and revert `BadSignature` — it fails closed rather
 than accepting the wrong signer.
+
+### 2.6 Request translation, and which half of the binding survives it
+
+Everything above concerns the *shape* of the signed text. This concerns what goes into it, and it
+is the one place where a provider can be perfectly well-behaved and still make on-chain request
+binding impossible.
+
+0G's broker accepts a **portable OpenAI-schema** chatbot request and, before forwarding it upstream,
+rewrites certain fields into the **third-party schema** the target model actually understands —
+`0gfoundation/0g-serving-broker`, `docs/design/request-translation.md`. Three rewrites are named
+there:
+
+| Field | What the broker does |
+|---|---|
+| `max_tokens` ↔ `max_completion_tokens` | folded into whichever name the upstream expects |
+| `reasoning_effort` | mapped into one of five upstream dialects |
+| `model` | "model validation may already have rewritten [it] to the upstream id" |
+
+Whether any of this happens is driven by the model's advertised `supportedParameters`. The same
+document is explicit about the other case: *"If it advertises nothing translatable, the body passes
+through untouched."*
+
+**The broker signs what it forwarded, not what it received.** So the request half of the signed
+text is a `sha256` over the translated body.
+
+Which half survives, stated plainly:
+
+- **The response half always survives.** The response is hashed exactly as delivered, so
+  `sha256(rawResponse)` matches the bytes a client holds and a contract can be handed. `VerdictLib`
+  reading a verdict out of a body nobody can substitute is unaffected by translation.
+- **The request half survives only where the body passes through untouched.**
+  `TreasuryGate.execute` rebuilds the exact request bytes from its own state and derives the writ id
+  from `sha256` of them ([§5](#5-the-nine-fact-question)). Where the broker translated, that hash is
+  over bytes the enclave never saw, the id does not match the notarized writ, and the gate reverts
+  `WritNotNotarized`. **A gate pinned to a translating provider can never settle.** No amount of
+  contract-side cleverness recovers it: the transformation depends on the upstream's schema, which
+  is not on chain.
+
+This is not a defect in 0G and not something Writ works around. It is a documented property of the
+broker, and the only reason it is visible at all is that Writ rebuilds the request **inside the
+contract**. 0G's own client-side helper cannot see it: `Verifier.verifySignature` verifies the
+signature over whatever `text` the provider returned, so a translated request still reads as
+verified. That is a scope limitation of a convenience helper — it is a signature check, not a
+binding check, and 0G's protocol documentation says the client is the party holding the bytes — but
+it does mean the divergence has nowhere to surface until somebody recomputes the hash from bytes
+they control. A contract that must compute the hash itself has no choice but to notice.
+
+**So it is measured, never assumed.** `sdk/src/passthrough.ts` sends one minimal request — `model`
+and `messages`, nothing in the table above — fetches the proof, and reports one of three verdicts:
+
+| Verdict | Meaning |
+|---|---|
+| `passthrough` | both halves match; a gate can pin the question as well as the answer |
+| `response-only` | the response half matches, the request half does not; a gate pinned here never settles |
+| `unusable` | the check could not be completed — not TeeML, signer not acknowledged, unreachable, proof unfetchable, signature not the registry's — with the reason |
+
+```bash
+cd writ/sdk && pnpm tsx examples/check-provider.ts 0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D
+```
+
+Measured live on 2026-08-27 across four acknowledged TeeML providers, two forwarded the body
+untouched and two did not; the response half matched on all four. The table is in
+[`../CLAIMS.md`](../CLAIMS.md) NOT-CLAIMED #30, with the addresses. Nothing in the registry
+separates the two groups — same `verifiability`, same acknowledgement, same non-zero signer — which
+is exactly why there is a command rather than a rule of thumb.
+
+One thing the verdict does **not** license. A `passthrough` result is a measurement of the body that
+was sent. Adding `max_tokens` or `reasoning_effort` to a gate's prompt afterwards changes what the
+broker is being asked to translate, and the measurement no longer covers it.
+`translatableFields(bodyBytes)` names those fields in any body, which is the cheap way to notice.
 
 ---
 
@@ -1445,7 +1515,10 @@ Three things follow, and one does not.
 
 **It binds the question.** Because the request hash is inside the signature and the contract
 computes that hash from its own `buildRequestBody`, a proof only satisfies a gate if the TEE signed
-a response to the exact question that gate would have asked for those exact parameters.
+a response to the exact question that gate would have asked for those exact parameters. **This
+holds only where the provider's broker forwards the request body unmodified** — where it translates,
+the enclave signed a hash of bytes no contract can rebuild and the gate never settles. It is a
+property to measure before a gate is pinned; see [§2.6](#26-request-translation-and-which-half-of-the-binding-survives-it).
 
 **It binds the answer.** `sha256(rawResponse)` re-binds the revealed bytes, so `VerdictLib` reads a
 verdict out of a body nobody can substitute.
@@ -1504,6 +1577,11 @@ The full ledger of what is and is not claimed, with evidence tiers, is in
 | 0G `InferenceServing`, Galileo testnet chain 16602 | `0xa79F4c8311FF93C06b8CfB403690cc987c93F91E` |
 | 0G Storage turbo indexer, mainnet | `https://indexer-storage-turbo.0g.ai` |
 | 0G mainnet RPC | `https://evmrpc.0g.ai` |
-| `WritRegistry` | `<UNDEPLOYED — no address exists yet>` |
-| `PolicyGateFactory` | `<UNDEPLOYED — no address exists yet>` |
-| `AgentTreasury` (demo) | `<UNDEPLOYED — no address exists yet>` |
+| `WritRegistry`, mainnet | `0x857D288652e4f4523347EFf1918B9E1263A574f4` |
+| `PolicyGateFactory`, mainnet | `0x4320Ae51D672f2636a0faFfb2B28C5520013b6D7` |
+| `AgentTreasury` (demo), mainnet | `0x2688059e106195941F320110bE2d5fe9a1c75fEE` |
+| `AgentTreasury`, first deployment — **kept, and it can never settle** | `0xaF9C87f5Eb7c3c5ebb16AcBa23C6cD25faCcAd63` |
+
+The first treasury is pinned to a provider whose broker translates the request. It is left in this
+table rather than deleted: it is the artifact that surfaced [§2.6](#26-request-translation-and-which-half-of-the-binding-survives-it),
+and a deployment that cannot settle is a more useful thing to be able to point at than a tidy list.
