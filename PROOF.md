@@ -600,9 +600,10 @@ fifth is no longer true:
 | 6.4 | No proof from a real enclave notarized | two, both recovering to `0xA46EA4FC…` |
 | 6.5 | The deployer wallet is unfunded | it is funded; that is what unblocked the rest |
 
-`5.5` and `1.11` remain accurate about the eval, and `EVAL.md` is correct as written. Wherever
-`README.md`, `JUDGES.md`, `MOCKS.md` or `docs/architecture.md` still carries a "nothing is deployed"
-banner, it predates this file and this file wins.
+`CLAIMS.md` §6 has since been rewritten around these facts and now reads "What has been run on
+mainnet, and what still has not". `5.5` and `1.11` remain accurate about the eval, and `EVAL.md` is
+correct as written. Wherever `README.md`, `JUDGES.md`, `MOCKS.md` or `docs/architecture.md` still
+carries a "nothing is deployed" banner, it predates this file and this file wins.
 
 ---
 
