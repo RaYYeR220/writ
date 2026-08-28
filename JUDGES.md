@@ -288,6 +288,11 @@ Read the middle column. Reading the right one as the price overstates `execute` 
 this wrong once and shipped a table that did exactly that; the story is
 [`CLAIMS.md` 1.9a](CLAIMS.md) and it is why both columns are given everywhere.
 
+Both columns are still a bench. What the four live mainnet transactions actually cost — read from
+their receipts, not from a harness — is in [`PROOF.md`](PROOF.md): 1,290,635 gas for the whole
+sequence, **0.004545 0G**. The bench understates a real `notarize` because the bench's registry is
+a mock and the live one is 0G's own contract.
+
 A dry run of the real deployment — reads 0G mainnet, broadcasts nothing, costs nothing:
 
 ```bash
