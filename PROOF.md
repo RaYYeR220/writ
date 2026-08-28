@@ -540,6 +540,20 @@ the provider and it has to be measured before a policy is pinned to one.
 The live deployment is pinned to `glm-5.2`, a measured pass-through provider. The stranded one is
 pinned to a translating provider. Both are on chain.
 
+That preflight now exists, and it is the one command in this repository that spends anything:
+
+```bash
+cd writ/sdk && pnpm tsx examples/check-provider.ts 0x7DCFe6AEa70350C2090041524c9B4A9262DCe87D
+```
+
+It sends one minimal request — `model` and `messages`, nothing the broker is documented to
+translate — fetches the proof, and reports `passthrough`, `response-only` or `unusable` with the
+reason, exiting 0, 1 or 2 so it can gate a deploy script. It never reports `passthrough` on
+incomplete evidence. Studio carries the same three states beside every provider it lists, as a
+property of the provider rather than as a failure, and shows an unmeasured provider as unmeasured.
+Written up in [`CLAIMS.md`](CLAIMS.md) NOT-CLAIMED #30 and
+[`docs/architecture.md`](docs/architecture.md) §2.6.
+
 ---
 
 ## What is still not proven
