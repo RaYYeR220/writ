@@ -43,6 +43,21 @@ function clean(v: string | undefined): string {
   return typeof v === 'string' ? v.trim() : ''
 }
 
+/**
+ * A comma-separated list, split and trimmed, with nothing thrown away.
+ *
+ * Entries are NOT validated here. An address that turns out not to be a gate, and a value that
+ * is not an address at all, both have to reach the docket so it can say so — dropping them
+ * quietly is how an operator ends up staring at a page that is missing their treasury and gives
+ * no reason for it.
+ */
+function list(v: string | undefined): string[] {
+  return clean(v)
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
 const CHAIN_ID = (() => {
   const raw = clean(process.env.NEXT_PUBLIC_CHAIN_ID)
   const n = raw ? Number(raw) : MAINNET_CHAIN_ID
@@ -59,6 +74,15 @@ export type AppConfig = {
   registry: string
   /** `PolicyGateFactory`. Empty means Studio can compose and preview but not deploy. */
   factory: string
+  /**
+   * Gates to watch that the factory did not deploy.
+   *
+   * A gate can be deployed by the factory, by a script, or by hand, and the factory's
+   * `GateDeployed` log only knows about the first kind. An operator watching a treasury they
+   * deployed themselves is an ordinary case, so the docket takes a list. Raw strings: the docket
+   * validates them and reports the ones that do not answer as gates.
+   */
+  gates: string[]
   inferenceServing: string
   indexerRpc: string
   explorer: string
@@ -75,6 +99,7 @@ export const config: AppConfig = {
   rpcUrl: clean(process.env.NEXT_PUBLIC_RPC_URL) || defaults?.rpcUrl || 'https://evmrpc.0g.ai',
   registry: clean(process.env.NEXT_PUBLIC_WRIT_REGISTRY),
   factory: clean(process.env.NEXT_PUBLIC_POLICY_GATE_FACTORY),
+  gates: list(process.env.NEXT_PUBLIC_GATES),
   inferenceServing:
     clean(process.env.NEXT_PUBLIC_INFERENCE_SERVING) ||
     defaults?.inferenceServing ||
@@ -118,6 +143,20 @@ export function missingRegistryReason(): string | null {
 export function missingFactoryReason(): string | null {
   if (!config.factory) {
     return 'NEXT_PUBLIC_POLICY_GATE_FACTORY is not set, so there is no factory to deploy through.'
+  }
+  return null
+}
+
+/**
+ * Whether there is any gate to watch at all.
+ *
+ * Deliberately separate from `missingFactoryReason`: deploying needs a factory, but *watching*
+ * does not. A gate deployed by a script is a perfectly ordinary gate, and a page that refused to
+ * read one because no factory was configured would be withholding records it can plainly see.
+ */
+export function missingGateSourceReason(): string | null {
+  if (!config.factory && config.gates.length === 0) {
+    return 'Neither NEXT_PUBLIC_POLICY_GATE_FACTORY nor NEXT_PUBLIC_GATES is set, so there is no gate to read. Nothing below is a claim about the chain.'
   }
   return null
 }

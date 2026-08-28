@@ -104,7 +104,7 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
     problems.push(`The registry's Notarized log could not be read: ${msg(e)}`)
   }
 
-  const gates = await discoverGates(range, problems, signal)
+  const gates = await discoverGates(config.gates, chainGateDiscovery(range, signal), problems)
   const entries: DocketEntry[] = []
   const spent = new Set<string>()
   const summaries: GateSummary[] = []
@@ -239,35 +239,125 @@ export async function loadDocket(signal?: AbortSignal): Promise<Docket> {
   }
 }
 
+export type DiscoveredGate = {
+  address: string
+  owner: string
+  /** How this app came to know about the gate. Both kinds are watched identically. */
+  source: 'factory' | 'configured'
+}
+
+export type GateDiscovery = {
+  /**
+   * Gates the factory reports it deployed. Absent when no factory is configured — which is a
+   * gap to state, not a reason to render nothing.
+   */
+  factoryGates?: () => Promise<{ address: string; owner: string }[]>
+  /**
+   * Proves a configured address really is a gate, and says who owns it.
+   *
+   * Must reject for anything that is not one. An address that answers nothing is left off the
+   * docket entirely rather than listed with zero decisions, because an empty gate row is
+   * indistinguishable from a gate that has simply never been used.
+   */
+  probeGate: (address: string) => Promise<{ owner: string }>
+}
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/
+
 /**
- * Every gate the factory has deployed.
+ * Every gate this app watches: the ones the factory deployed, plus the ones it was told about.
  *
- * Read from `GateDeployed` rather than by walking `allGates(i)`, because one filtered log query
- * beats N round trips and gives the owner for free. If the factory address is not configured the
- * docket still renders the registry's records; it just cannot say what any of them authorised.
+ * The factory half is read from `GateDeployed` rather than by walking `allGates(i)`, because one
+ * filtered log query beats N round trips and gives the owner for free.
+ *
+ * The configured half exists because a gate is not always a factory's doing. The first live
+ * `AgentTreasury` on 0G mainnet was deployed by a Foundry script, so the factory has never heard
+ * of it — and a docket that joins only on `GateDeployed` rendered its settled approval and its
+ * settled refusal as unspent records with zero counters. That is the worst class of bug this app
+ * can have: not a missing page, a confidently wrong one.
+ *
+ * Every way an entry can fail lands in `problems`. Nothing is dropped silently.
  */
-async function discoverGates(
-  range: Range,
+export async function discoverGates(
+  configured: readonly string[],
+  sources: GateDiscovery,
   problems: string[],
-  signal?: AbortSignal,
-): Promise<{ address: string; owner: string }[]> {
-  if (!config.factory) {
-    problems.push('NEXT_PUBLIC_POLICY_GATE_FACTORY is not set, so no gate decisions are included below.')
-    return []
-  }
-  try {
-    const factory = factoryContract()
-    const logs = (await queryChunked(factory, factory.filters.GateDeployed(), range, signal)) as EventLog[]
-    const seen = new Map<string, { address: string; owner: string }>()
-    for (const log of logs) {
-      if (!log.args) continue
-      const address = String(log.args[0])
-      seen.set(address.toLowerCase(), { address, owner: String(log.args[1]) })
+): Promise<DiscoveredGate[]> {
+  const found = new Map<string, DiscoveredGate>()
+
+  if (sources.factoryGates) {
+    try {
+      for (const g of await sources.factoryGates()) {
+        found.set(g.address.toLowerCase(), { address: g.address, owner: g.owner, source: 'factory' })
+      }
+    } catch (e) {
+      problems.push(`The factory's gate list could not be read: ${msg(e)}`)
     }
-    return [...seen.values()]
-  } catch (e) {
-    problems.push(`The factory's gate list could not be read: ${msg(e)}`)
-    return []
+  } else if (configured.length === 0) {
+    problems.push(
+      'Neither NEXT_PUBLIC_POLICY_GATE_FACTORY nor NEXT_PUBLIC_GATES is set, so no gate decisions are included below.',
+    )
+  } else {
+    problems.push(
+      `NEXT_PUBLIC_POLICY_GATE_FACTORY is not set, so only the ${configured.length} gate${
+        configured.length === 1 ? '' : 's'
+      } named in NEXT_PUBLIC_GATES are watched. Any other gate's decisions are missing below.`,
+    )
+  }
+
+  for (const entry of configured) {
+    if (!ADDRESS.test(entry)) {
+      problems.push(
+        `NEXT_PUBLIC_GATES contains ${JSON.stringify(entry)}, which is not a 20-byte address, so it is not being watched.`,
+      )
+      continue
+    }
+    // Already deployed by the factory: same gate, one row, and no second round trip to prove it.
+    if (found.has(entry.toLowerCase())) continue
+
+    try {
+      const { owner } = await sources.probeGate(entry)
+      found.set(entry.toLowerCase(), { address: entry, owner, source: 'configured' })
+    } catch (e) {
+      problems.push(
+        `NEXT_PUBLIC_GATES names ${entry}, but it did not answer as a gate, so it is left out rather than shown as a gate with no decisions: ${msg(e)}`,
+      )
+    }
+  }
+
+  return [...found.values()]
+}
+
+/**
+ * `discoverGates` wired to the chain.
+ *
+ * A configured address is probed with `getPolicy(1)` as well as `owner()`: `owner()` alone is a
+ * common enough signature that some unrelated contract would pass it, and a wrong address that
+ * looks like a gate is exactly the failure this whole function exists to prevent.
+ */
+function chainGateDiscovery(range: Range, signal?: AbortSignal): GateDiscovery {
+  return {
+    ...(config.factory
+      ? {
+          factoryGates: async () => {
+            const factory = factoryContract()
+            const logs = (await queryChunked(
+              factory,
+              factory.filters.GateDeployed(),
+              range,
+              signal,
+            )) as EventLog[]
+            return logs
+              .filter((log) => log.args)
+              .map((log) => ({ address: String(log.args[0]), owner: String(log.args[1]) }))
+          },
+        }
+      : {}),
+    probeGate: async (address: string) => {
+      const gate = gateContract(address)
+      const [owner] = await Promise.all([gate.owner(), gate.getPolicy(1n)])
+      return { owner: String(owner) }
+    },
   }
 }
 

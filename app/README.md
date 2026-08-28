@@ -19,15 +19,30 @@ Studio and sweeping a treasury need a signer.
 
 ```bash
 pnpm install
-cp .env.example .env.local     # then fill in the two contract addresses
+cp .env.example .env.local     # already points at the live mainnet deployment
 pnpm dev
 ```
 
 `pnpm test` runs the client-side verification suite. `pnpm build` produces the production build.
 
-Nothing is deployed yet, so the addresses in `.env.example` are blank. The app works the moment
-real ones are supplied; until then every view states plainly that there is nothing to read rather
-than rendering an empty page that could be mistaken for an empty chain.
+`.env.example` ships the mainnet addresses, so a fresh clone reads the real docket. Point it
+somewhere else and every view still states plainly what it could not read rather than rendering an
+empty page that could be mistaken for an empty chain.
+
+Two of the variables are worth reading twice.
+
+**`NEXT_PUBLIC_GATES`** — a comma-separated list of gates to watch that the factory did not deploy.
+The docket finds gates through `PolicyGateFactory`'s `GateDeployed` log, which only knows about
+gates the factory made. The live `AgentTreasury` went out through `script/Deploy.s.sol`, so without
+this list its settled approval and its settled refusal both render as records that no gate ever
+acted on. An address here that does not answer as a gate is reported on the page with the reason,
+never dropped silently and never shown as a gate with no decisions.
+
+**`NEXT_PUBLIC_FROM_BLOCK`** — set it to the registry's deployment block. 0G mainnet is past 42
+million blocks and public RPCs cap the span of a single `eth_getLogs`, so scanning from genesis
+means thousands of chunked calls before the first row appears. Left at 0 the app scans the last
+120,000 blocks instead. Either way the page says the exact block range it read, so a short docket
+is never mistaken for a quiet chain.
 
 To try it without spending anything, run a local fork and point the app at it:
 

@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import { Amount, Gap } from '@/components/primitives'
 import { explain } from '@/lib/chain'
-import { config, missingFactoryReason } from '@/lib/config'
+import { config, missingGateSourceReason } from '@/lib/config'
 import { loadDocket, type GateSummary } from '@/lib/docket'
 import { formatCount } from '@/lib/format'
 
@@ -18,7 +18,7 @@ export function GateIndex() {
   const [state, setState] = useState<State>({ kind: 'loading' })
 
   useEffect(() => {
-    const reason = missingFactoryReason()
+    const reason = missingGateSourceReason()
     if (reason) {
       setState({ kind: 'unconfigured', reason })
       return
@@ -51,7 +51,7 @@ export function GateIndex() {
           </div>
         </div>
 
-        {state.kind === 'loading' ? <div className="pad center dim">Reading the factory&rsquo;s gate list…</div> : null}
+        {state.kind === 'loading' ? <div className="pad center dim">Reading the gate list…</div> : null}
 
         {state.kind === 'unconfigured' || state.kind === 'error' ? (
           <div className="pad" style={{ maxWidth: '62ch', margin: '0 auto' }}>
@@ -63,10 +63,18 @@ export function GateIndex() {
 
         {state.kind === 'ready' && state.gates.length === 0 ? (
           <div className="pad" style={{ maxWidth: '62ch', margin: '0 auto' }}>
-            <Gap title="No gates deployed in the scanned range">
+            <Gap title="No gates to show in the scanned range">
               <p>
-                <code>PolicyGateFactory</code> at <span className="mono">{config.factory}</span> has emitted no{' '}
-                <code>GateDeployed</code> events between the scanned blocks.{' '}
+                {config.factory ? (
+                  <>
+                    <code>PolicyGateFactory</code> at <span className="mono">{config.factory}</span> has emitted no{' '}
+                    <code>GateDeployed</code> events between the scanned blocks
+                    {config.gates.length > 0 ? ', and none of the gates named in NEXT_PUBLIC_GATES answered' : ''}.{' '}
+                  </>
+                ) : (
+                  <>None of the gates named in NEXT_PUBLIC_GATES answered, and no factory is configured to look for
+                    others.{' '}</>
+                )}
                 <Link href="/studio">Compose one in Studio</Link>.
               </p>
             </Gap>
