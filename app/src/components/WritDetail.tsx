@@ -10,6 +10,7 @@ import { formatCount, utc } from '@/lib/format'
 import { shortAddress } from '@/lib/hashes'
 import { headRange } from '@/lib/logs'
 import { findOutcome, type Outcome } from '@/lib/outcome'
+import { rulerReading } from '@/lib/ruling'
 import { chainSources, notarizingTx } from '@/lib/sources'
 import { extractAnswer, extractPrompt, parseVerdict, type Transcript } from '@/lib/transcript'
 import {
@@ -142,7 +143,7 @@ export function WritDetail({ id }: { id: string }) {
           notaryTx={notaryTx}
         />
 
-        <Ruler risk={risk} ceiling={ceiling} held={held} sideClass={sideClass} />
+        <Ruler risk={risk} ceiling={ceiling} held={held} refusedBy={outcome?.refusedBy ?? null} sideClass={sideClass} />
 
         <Bytes
           writ={writ}
@@ -294,16 +295,23 @@ function Hero({
 /**
  * The ceiling is not a tick mark on a bar. It is the centre line, so a decision that went over
  * it is literally further from the middle of your screen.
+ *
+ * The picture measures the score against the line. It cannot see *why* the funds stayed, so the
+ * words come from `refusedBy` instead — see `@/lib/ruling`. A model that answered DENY at a
+ * score of 95 against a ceiling of 50 really is 45 past the line, and the ceiling really is not
+ * why it was held.
  */
 function Ruler({
   risk,
   ceiling,
   held,
+  refusedBy,
   sideClass,
 }: {
   risk: number | null
   ceiling: number | null
   held: boolean | null
+  refusedBy: number | null
   sideClass: string
 }) {
   if (risk === null) return null
@@ -321,20 +329,22 @@ function Ruler({
     )
   }
 
-  const delta = risk - ceiling
+  const reading = rulerReading({ risk, ceiling, held, refusedBy })
+  const past = reading.past
   const span = Math.max(ceiling, 100 - ceiling, 1)
-  const reach = Math.max(6, Math.min(94, Math.round((Math.abs(delta) / span) * 100)))
-  const past = delta > 0
+  const reach = Math.max(6, Math.min(94, Math.round((Math.abs(reading.delta) / span) * 100)))
 
   const measured = (
     <div className={`ruler-half ${past ? 'l' : 'r'}`}>
       <div className="ruler-track" />
+      {/* `past` is the only thing the one reserved accent keys off, so a model that declined
+          under the ceiling draws no overshoot and stays in the verdict colour. */}
       <div className={`ruler-fill ${past ? 'past' : ''}`} style={{ width: `${reach}%` }} />
       <div className="ruler-mark" style={past ? { right: `${reach}%` } : { left: `${reach}%` }} />
       <div className={`ruler-lab ${past ? 'past' : ''}`} style={past ? { right: `${reach}%` } : { left: `${reach}%` }}>
-        RISK {risk} · {past ? `+${delta} OVER` : `${Math.abs(delta)} UNDER`}
+        {reading.label}
       </div>
-      <div className="ruler-end">{past ? 'over the ceiling → held' : 'under the ceiling → released'}</div>
+      <div className="ruler-end">{reading.end}</div>
     </div>
   )
 
@@ -354,6 +364,11 @@ function Ruler({
         </div>
       </div>
       {past ? blank : measured}
+      {reading.note ? (
+        <p className="note" style={{ gridColumn: '1 / -1', maxWidth: '64ch', margin: '20px auto 0', padding: '0 18px' }}>
+          {reading.note}
+        </p>
+      ) : null}
     </div>
   )
 }

@@ -86,9 +86,10 @@ export function Measure({ risk, ceiling }: { risk: number | null; ceiling: numbe
   const reach = Math.max(6, Math.min(92, Math.round((Math.abs(delta) / span) * 100)))
   const past = delta > 0
 
-  // The overshoot is drawn as the portion of the reach that lies beyond the ceiling, which for a
-  // held decision is all of it — the seam is the ceiling, so any distance out on the held side
-  // is by definition over.
+  // The overshoot is drawn only where there is one. A held decision is not automatically an
+  // over-ceiling decision: a model that answers DENY at a risk of 20 against a ceiling of 50 is
+  // held with nothing to overshoot, so the reserved accent stays off and the sign on the label
+  // does the talking. Who refused is a separate fact, and the row prints it in words.
   return (
     <div className="measure" style={{ ['--reach' as string]: reach }} aria-hidden="true">
       <div className="track" />
