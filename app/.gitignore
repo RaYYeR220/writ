@@ -6,3 +6,5 @@ out/
 .env.local
 .env.*.local
 !.env.example
+
+.vercel
