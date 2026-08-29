@@ -1,5 +1,9 @@
 # Five minutes, in order
 
+**The live app: https://writ-lawuh0nm8-rayyer220s-projects.vercel.app**
+It reads 0G mainnet directly from your browser. No wallet, no keys, no install — the
+backend serves the page and nothing else.
+
 Everything in this file is read-only. **No credentials, no install, no funds** for the reading
 path — every link is a file in this repository. The optional commands need Foundry (and, for the
 last group, Node and pnpm); all of them read 0G mainnet without spending anything.
