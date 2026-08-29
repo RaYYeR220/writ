@@ -7,6 +7,11 @@ not have to trust the explorer either.
 RPC `https://evmrpc.0g.ai` · explorer [chainscan.0g.ai](https://chainscan.0g.ai) · everything here
 is read-only and spends nothing.
 
+The fastest way to check any of it without a terminal:
+**https://writ-lawuh0nm8-rayyer220s-projects.vercel.app** — the docket and every proof page read
+0G mainnet directly in your browser, re-derive the hashes there, and recover the signer there. No
+wallet, no keys, no install. That app's backend serves the page and is not in the trust path.
+
 ```bash
 cast chain-id --rpc-url https://evmrpc.0g.ai      # 16661
 ```
