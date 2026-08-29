@@ -262,13 +262,13 @@ enclave's. Remove 0G Storage and the record stops being readable by anyone but i
 | [`app/`](app) | Next.js 16 / React 19 docket. `/` every decision, `/writ/[id]` one proof chain as four independently checkable rows plus a live tamper demo, `/studio` compose and deploy a policy, `/gate/[address]` one treasury. Notes: [`app/README.md`](app/README.md) | **126** |
 | [`eval/`](eval) | Pre-registered scenarios, graded against a committed answer key, run end to end through the real SDK and the real contracts | 43 scenarios |
 
-**622 tests in total**, all four suites re-run on 2026-08-28 for this README. Counts per suite:
+**635 tests in total**, all four suites re-run on 2026-08-29 for this README. Counts per suite:
 
 ```
 contracts   217 passed, 0 failed    (forge test — includes the fork suite, so it needs network)
 sdk         134 passed              (one test makes a real mainnet read)
 mcp         145 passed              (no chain, no network)
-app         126 passed              (no chain, no network)
+app         139 passed              (no chain, no network)
 ```
 
 The graded evaluation's committed scorecard (`eval/results/fork.json`, read back for this README):

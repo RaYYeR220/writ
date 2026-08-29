@@ -134,7 +134,7 @@ line here is "never run", not "not wired".
 This suite deliberately has no chain: it tests the server's decisions, not the contracts'. The
 contracts are tested by suites 1 and 2, and the two are joined by suite 3.
 
-## 4a. Web app tests — `writ/app`, 126 tests
+## 4a. Web app tests — `writ/app`, 139 tests
 
 `pnpm test`. **No chain, no network, nothing stubbed out at the module boundary that is not named
 here.**

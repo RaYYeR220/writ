@@ -156,7 +156,7 @@ treasury: balance, policy, ledger, recovery countdown).
 
 | # | Claim | Tier | Proof |
 |---|---|---|---|
-| 7.1 | 126 app tests pass, counted 2026-08-28 | REPRODUCIBLE | `cd writ/app && pnpm test`. **No app test touches a network** — `fetch` is stubbed and chain reads go through an injected source surface |
+| 7.1 | 139 app tests pass, counted 2026-08-29 | REPRODUCIBLE | `cd writ/app && pnpm test`. **No app test touches a network** — `fetch` is stubbed and chain reads go through an injected source surface |
 | 7.2 | The app's hand-written ABIs match the compiled artifacts, including the return shape of `getWrit` and the absence of a `transcriptRoot` field | REPRODUCIBLE | `app/test/abi.test.ts` |
 | 7.3 | A reader re-checks a writ **in their own browser**: the transcript bytes are fetched from 0G Storage, content-addressed against the merkle root, re-hashed to `reqHash`/`respHash`, and the signature is recovered against the on-chain `teeSignerAddress` | REPRODUCIBLE; the two live writs exercise it end to end | `app/src/lib/verify.ts`, `app/src/lib/storage.ts`, `app/src/lib/zg-merkle.ts`; `app/test/verify.test.ts` (24), `app/test/storage.test.ts` (9) — all against stubbed `fetch`, so the *tests* touch no network. The live path is 6.3 |
 | 7.4 | The app carries its own port of 0G Storage's merkle-root algorithm rather than shipping the storage SDK to the browser | REPRODUCIBLE, with the caveat in 7.5 | `app/src/lib/zg-merkle.ts`; `app/test/zg-merkle.test.ts`, 8 vectors across 12 tests |
@@ -795,7 +795,7 @@ cd ../sdk && pnpm install && pnpm test
 # mcp: 145 tests, no chain at all
 cd ../mcp && pnpm install && pnpm test
 
-# app: 126 tests, no network at all
+# app: 139 tests, no network at all
 cd ../app && pnpm install && pnpm test
 
 # the graded evaluation, on a fork of 0G mainnet. Regenerate this after ANY change to a
