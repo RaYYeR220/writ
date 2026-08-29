@@ -6,6 +6,8 @@ permanently, and lets other contracts act on the verified decision — refusals 
 **Live, reading 0G mainnet in your browser: https://writ-lawuh0nm8-rayyer220s-projects.vercel.app**
 Nothing to install, no wallet, no keys — the docket and every proof page are read-only.
 
+**Three-minute demo: https://youtu.be/K5v2sAibj7c**
+
 Reviewing this? Start at **[`JUDGES.md`](JUDGES.md)** — a five-minute path, no credentials, no
 install, no funds. The full ledger of what is and is not claimed is in
 **[`CLAIMS.md`](CLAIMS.md)**, including the NOT-CLAIMED list. Read it adversarially; that is what

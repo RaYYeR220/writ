@@ -1,6 +1,7 @@
 # Five minutes, in order
 
 **The live app: https://writ-lawuh0nm8-rayyer220s-projects.vercel.app**
+**The three-minute demo: https://youtu.be/K5v2sAibj7c**
 It reads 0G mainnet directly from your browser. No wallet, no keys, no install — the
 backend serves the page and nothing else.
 
